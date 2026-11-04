@@ -1,0 +1,405 @@
+# Run every testbench under the source tree and report one verdict per test.
+#
+# WHY THIS EXISTS
+#   The previous workflow enumerated testbenches by hand in each invocation.
+#   That has a specific failure mode: adding a testbench and forgetting to run
+#   it is invisible -- nothing reports the gap, and the suite simply covers less
+#   than it appears to. A regression suite whose coverage depends on somebody
+#   remembering to update a list is not a regression suite.
+#
+# HOW DEPENDENCIES ARE RESOLVED
+#   No hand-maintained table. iverilog's -y option searches a directory for a
+#   file whose name matches an unresolved module, so each testbench is compiled
+#   against whatever the RTL happens to be. This relies on file names matching
+#   module names, which holds throughout this project.
+#
+# WHAT IT DOES NOT DO
+#   It does not run Questa. sim.ps1 covers that for individual tests, and the
+#   cross-check between two simulators has caught real problems -- but running
+#   everything twice is slow, so that stays a deliberate step rather than the
+#   default here.
+#
+# USAGE
+#   pwsh -File run-regression.ps1
+#   pwsh -File run-regression.ps1 -Filter addr_gen      # only matching names
+#   pwsh -File run-regression.ps1 -List                 # show what would run
+#
+# NOTE: ASCII only.
+
+param(
+    [string]$Filter = '',
+    [switch]$List,
+    [int]$PerTestTimeoutSec = 300,
+    [string]$SysDir = 'C:\fpga_work\sys',
+    [string]$TbDir  = 'C:\fpga_work\tb',
+    [string]$SrcDir = 'C:\fpga_work\src',
+    [string]$IverilogBin = 'C:\Users\25437\iverilog\bin',
+    [string]$PrimDir = 'C:\Efinity\2026.1\sim_models\verilog'
+)
+
+$ErrorActionPreference = 'Continue'
+$env:Path += (';' + $IverilogBin)
+
+# ---------------------------------------------------------------- discovery
+$searchDirs = @((Join-Path $SysDir 'tb'), $TbDir) | Where-Object { Test-Path $_ }
+
+# Duplicate file names across the two testbench directories are resolved
+# EXPLICITLY, and a divergence is announced.
+#
+# This used to be `Sort-Object Name -Unique`, which silently keeps whichever
+# copy it happens to see first. Two directories really do hold same-named files
+# here (sys\tb and tb\), and one pair had genuinely diverged: tb_bitblt_top.v
+# was 768 lines in sys\tb and a stale 611-line truncation in tb\. The suite was
+# running the good one only because sys\tb is searched first -- a property of
+# argument order, not of the files. Reorder the list and the truncated copy
+# becomes the official test with no warning at all.
+#
+# Earlier directories win, but if the content differs that is stated loudly.
+$tbs     = @()
+$seen    = @{}
+$dupDiff = 0
+foreach ($d in $searchDirs) {
+    foreach ($f in (Get-ChildItem $d -File -Filter 'tb_*.v' -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        if ($seen.ContainsKey($f.Name)) {
+            $prev = $seen[$f.Name]
+            if ((Get-FileHash $prev.FullName).Hash -ne (Get-FileHash $f.FullName).Hash) {
+                $dupDiff++
+                Write-Host ('  *** DUPLICATE, DIFFERENT CONTENT: ' + $f.Name) -ForegroundColor Red
+                Write-Host ('        using  : ' + $prev.FullName)
+                Write-Host ('        ignored: ' + $f.FullName)
+            }
+        } else {
+            $seen[$f.Name] = $f
+            $tbs += $f
+        }
+    }
+}
+if ($dupDiff -gt 0) {
+    Write-Host ''
+    Write-Host ('  ' + $dupDiff + ' duplicated name(s) diverged -- reconcile them, do not rely on') -ForegroundColor Red
+    Write-Host '  directory order to pick the right one.' -ForegroundColor Red
+    Write-Host ''
+}
+
+if ($Filter -ne '') {
+    $tbs = $tbs | Where-Object { $_.Name -like ('*' + $Filter + '*') }
+}
+
+if ($tbs.Count -eq 0) {
+    Write-Host 'No testbenches found.' -ForegroundColor Yellow
+    exit 2
+}
+
+Write-Host ('Discovered ' + $tbs.Count + ' testbench(es):')
+foreach ($t in $tbs) { Write-Host ('  ' + $t.Name) }
+
+if ($List) { exit 0 }
+Write-Host ''
+
+# Testbenches that print numbers and no verdict. Kept as an explicit list
+# rather than a heuristic: guessing would eventually exempt a real test.
+$measurementOnly = @('tb_fifo_latency.v', 'tb_counter.v')
+
+# Library files whose FILE name does not match the MODULE name inside, so -y
+# cannot find them.
+#
+# These MUST be attached per testbench, not added to every compile: listing a
+# file that also sits in a -y directory makes iverilog elaborate it twice and
+# every test fails with "already declared in this scope". The first attempt did
+# exactly that and took the suite from 12 passing to 0.
+$perTestExtra = @{}
+$dcf = Join-Path $SysDir 'rtl\dual_clock_fifo.v'
+if (Test-Path $dcf) {
+    $perTestExtra['tb_fifo_latency.v'] = @($dcf)
+}
+
+# NOTE: do NOT attach efx_srl8.v here for tb_mux_video. -y $PrimDir already
+# resolves EFX_SRL8, and listing the file explicitly corrupts the argument list
+# ("-y: No such file or directory"), which looks like a missing primitive but
+# is not. That misdiagnosis cost a round.
+#
+# ---------------------------------------------------------------------------
+# Extra cases: the same testbench run a second time with a plusarg.
+#
+# Some behaviour only exists in a non-default configuration, and testing just
+# the default one leaves the regression green if that behaviour is deleted.
+# The cfg_error contract is the clear case: the default run proves a VALID
+# frame buffer configuration is accepted, and only this run proves an INVALID
+# one is rejected and fetches nothing.
+# ---------------------------------------------------------------------------
+$extraCases = @(
+    @{ name     = 'tb_bitblt_video_out [cfg_error]'
+       tb       = 'tb_bitblt_video_out.v'
+       plusargs = @('+stride=2560', '+expect_cfg_error') }
+)
+
+$pass = 0; $fail = 0; $results = @()
+$trackedWarn = @()   # counted, not yet fatal; printed in the summary
+$t0 = Get-Date
+
+foreach ($t in $tbs) {
+    $name = $t.Name
+    $exe  = Join-Path $env:TEMP ($name -replace '\.v$', '.exe')
+
+    # -y lets iverilog resolve module names against these directories, so no
+    # per-test file list is needed -- WITH TWO CAVEATS, both learned the hard way
+    # when the first full run reported PASS=12 FAIL=4:
+    #
+    #   1. -y matches a module name against a FILE name. dual_clock_fifo.v
+    #      contains BOTH dual_clock_fifo_wrapper and dual_clock_fifo, so
+    #      tb_fifo_latency could not find its DUT and failed to elaborate.
+    #      $extraLibs below lists such files explicitly.
+    #
+    #   2. -y does not help with `include. Axi_Mux.v pulls in Axi_Mux_Param.vh,
+    #      so every compile needs -I pointing at the rtl directory -- without it
+    #      tb_mux_video fails to elaborate even though the module is found.
+    #
+    # The src directory is also searched: alpha_blend.v and counter.v live there,
+    # not under sys/rtl.
+    #
+    # NOT named $args: that is a PowerShell automatic variable, and assigning to
+    # it silently breaks argument passing. This project has already lost time to
+    # exactly that once, with $Args in a Start-Process call.
+    # -Wall IS ON, AND TWO WARNING CLASSES ARE FATAL.
+    #
+    # WHY THIS EXISTS (2026-10-07). bitblt_top.v used nineteen signals in
+    # instantiation port maps before declaring them. Verilog makes an undeclared
+    # identifier an implicit 1-bit wire, so seventeen of them -- which are really
+    # 16 or 32 bits -- were 1 bit wide at the point of use. iverilog accepted it
+    # without -Wall and the whole regression passed; Efinity appears to collect
+    # declarations before connecting, so synthesis agreed; Questa rejected the
+    # file outright with "already declared in this scope". Three tools, two
+    # behaviours, and nothing in this suite was watching.
+    #
+    # So: implicit definitions are now a FAILURE, as is a literal backtick-r
+    # backtick-n sequence in the source (a script once wrote "\r\n" into a .v
+    # file as characters instead of newlines, which produced a compressed line
+    # that iverilog tolerated and Questa rejected).
+    #
+    # NOT YET FATAL, and deliberately visible rather than quietly allowed:
+    # dangling input ports and unsized-expression clipping also appear under
+    # -Wall. They are real findings with their own work still to do, so the
+    # count is printed and tracked here. They are NOT failures YET because
+    # turning them on today would redden the suite for reasons unrelated to this
+    # fix, and a suite that is red for known reasons stops being read. Each is
+    # listed in docs/45 with what it means and what has to happen first.
+    $ivArgs = @('-g2005', '-Wall', '-o', $exe,
+                '-I', (Join-Path $SysDir 'rtl'),
+                '-y', (Join-Path $SysDir 'rtl'),
+                '-y', $SrcDir,
+                '-y', $TbDir,
+                '-y', (Join-Path $SysDir 'tb'),
+                '-y', $PrimDir)
+    if ($perTestExtra.ContainsKey($name)) { $ivArgs += $perTestExtra[$name] }
+    $ivArgs += $t.FullName
+
+    $call = (& iverilog @ivArgs 2>&1)
+    $cerr = $call | Where-Object { $_ -match 'error' }
+    if ($cerr) {
+        $results += ('  {0,-30} COMPILE FAILED' -f $name)
+        $results += ($cerr | Select-Object -First 2 | ForEach-Object { '        ' + $_ })
+        $fail++
+        continue
+    }
+
+    # fatal warning classes
+    $fatal = $call | Where-Object { $_ -match 'implicit definition' }
+    if ($fatal) {
+        $results += ('  {0,-30} FATAL: {1} implicit declaration(s)' -f $name, @($fatal).Count)
+        $results += ($fatal | Select-Object -First 2 | ForEach-Object { '        ' + $_.Trim() })
+        $fail++
+        continue
+    }
+
+    # Counted but NOT YET fatal -- see the block comment above and docs/45.
+    # ---- one warning class is NOT ours and must not be "fixed" ----
+    #
+    # simple_dual_port_ram.v:30 and async_fifo_gray.v:81 both shift an unsized
+    # literal -- (('sd1)<<(ADDR_WIDTH)) and (('sd1)<<(AW)) -- which iverilog
+    # expands to 65568 bits and then clips. The results happen to be correct, but
+    # that is luck rather than arithmetic.
+    #
+    # They are VENDOR files: simple_dual_port_ram is Efinity IP and
+    # async_fifo_gray comes from the reference design. Editing them would fork us
+    # from the vendor version, and the next IP update would silently undo it. So
+    # this class is filtered out by FILE, not by message -- and only for these two
+    # files, so a new unsized shift in our own RTL still comes through.
+    #
+    # Everything iverilog prints about those two files is dropped from the counts;
+    # a compile ERROR in them would still fail the build through $cerr above.
+    $VENDOR_FILE_WHITELIST = @('simple_dual_port_ram.v', 'async_fifo_gray.v')
+    $ours = $call | Where-Object {
+        $line = $_
+        -not ($VENDOR_FILE_WHITELIST | Where-Object { $line -match [regex]::Escape($_) })
+    }
+    $nDangle = @($ours | Where-Object { $_ -match 'dangling input port' }).Count
+    $nUnsized = @($ours | Where-Object { $_ -match 'Unsized expression' }).Count
+    if ($nDangle -gt 0 -or $nUnsized -gt 0) {
+        $trackedWarn += ('{0}: dangling={1} unsized={2}' -f $name, $nDangle, $nUnsized)
+    }
+
+    $out = & vvp $exe 2>&1
+    Remove-Item $exe -Force -ErrorAction SilentlyContinue
+
+    $verdict = ($out | Select-String -Pattern 'PASS: all|RESULT: PASS|RESULT: FAILED|RESULT: FAIL' |
+                Select-Object -Last 1)
+    $vt = if ($verdict) { $verdict.Line.Trim() } else { '(no verdict)' }
+
+    if ($vt -match 'PASS: all|RESULT: PASS') {
+        $results += ('  {0,-30} {1}' -f $name, $vt); $pass++
+    } elseif ($measurementOnly -contains $name) {
+        $results += ('  {0,-30} measurement-only, no verdict expected' -f $name); $pass++
+    } else {
+        $results += ('  {0,-30} {1}' -f $name, $vt); $fail++
+    }
+}
+
+# ---------------------------------------------------------------------------
+# literal-escape scan
+#
+# A script earlier in this project wrote the four characters backslash-r
+# backslash-n into a .v file as literal text instead of real newlines. The result
+# was a whole statement block compressed onto one line with a backtick-r
+# backtick-n sequence in the middle. iverilog accepted it and the regression
+# passed; Questa rejected it with "Macro `r is undefined".
+#
+# This is a SOURCE scan rather than a compiler check because it has to run even
+# for files no testbench includes.
+#
+# The pattern is the exact sequence, not any backtick: Verilog uses backticks for
+# macros legitimately (`RANKS in system_top.v, for instance), so a looser match
+# would fire on correct code and get switched off.
+$literalEsc = @()
+foreach ($src in @(Get-ChildItem $SrcDir -Filter '*.v' -ErrorAction SilentlyContinue) +
+                  @(Get-ChildItem $TbDir  -Filter '*.v' -ErrorAction SilentlyContinue) +
+                  @(Get-ChildItem (Join-Path $SysDir 'rtl') -Filter '*.v' -ErrorAction SilentlyContinue)) {
+    $hit = Select-String -Path $src.FullName -Pattern '`r`n' -Encoding UTF8 -ErrorAction SilentlyContinue
+    if ($hit) { $literalEsc += ('{0}:{1}' -f $src.Name, ($hit | Select-Object -First 1).LineNumber) }
+}
+if ($literalEsc.Count -gt 0) {
+    Write-Host ''
+    Write-Host ('  FATAL: literal backtick-r backtick-n in source: ' + ($literalEsc -join ', ')) -ForegroundColor Red
+    Write-Host '         These are \r\n written as characters instead of newlines.' -ForegroundColor Red
+    $fail += $literalEsc.Count
+}
+
+# ---------------------------------------------------------------------------
+# EMPTY OR TRIVIAL SOURCE FILES
+#
+# tb_counter.v was reduced to two bytes -- a single blank line -- by a one-off
+# script that read the file, did a string replace, and wrote the result back; the
+# variable came out empty and the file was overwritten with nothing.
+#
+# The regression did not notice, for two reasons that compounded:
+#   * tb_counter.v is in $measurementOnly, so no verdict is expected from it and
+#     "no verdict" is treated as a pass
+#   * an empty file elaborates to nothing and prints nothing, which also looks
+#     like a pass
+# So a file that tested nothing at all was reported as fine, every run, for a day.
+#
+# A testbench that cannot possibly test anything must be an error regardless of
+# which list it is on. Size is a crude proxy but it is the right one here: the
+# real unit was 1918 bytes, and nothing in this project's rtl/ or tb/ is
+# legitimately under 200. The one genuine exception is define.v (66 bytes, a
+# handful of vendor macros), which has no testbench of its own and is skipped by
+# the tb_* filter below.
+# NOTE ON WHICH DIRECTORIES. The first version of this check looked at $TbDir and
+# $SrcDir -- which are C:\fpga_work\tb and C:\fpga_work\src, the OLD locations. The
+# regression actually resolves modules from sys\tb and sys\rtl first (that is why
+# the duplicate-name warning says "using: sys\tb, ignored: fpga_work\tb"). So the
+# check was inspecting directories the run does not use, and an injected empty
+# file in sys\tb passed straight through. Every directory that iverilog is given
+# with -y has to be covered, or the guard has a hole exactly where it matters.
+$tiny = @()
+foreach ($d in @($TbDir, $SrcDir,
+                 (Join-Path $SysDir 'tb'), (Join-Path $SysDir 'rtl'))) {
+    foreach ($src in @(Get-ChildItem $d -Filter '*.v' -ErrorAction SilentlyContinue)) {
+        # define.v is a handful of vendor macros and is legitimately tiny; it is
+        # not a testbench and never had one.
+        if ($src.Name -eq 'define.v') { continue }
+        if ($src.Length -lt 200) { $tiny += ('{0} ({1} B)' -f $src.Name, $src.Length) }
+    }
+}
+$tiny = $tiny | Sort-Object -Unique
+if ($tiny.Count -gt 0) {
+    Write-Host ''
+    Write-Host ('  FATAL: source file is empty or trivial: ' + ($tiny -join ', ')) -ForegroundColor Red
+    Write-Host '         A testbench this size cannot test anything. It would pass every' -ForegroundColor Red
+    Write-Host '         run while examining nothing -- which is how a two-byte tb_counter.v' -ForegroundColor Red
+    Write-Host '         survived a full day of green regressions.' -ForegroundColor Red
+    $fail += $tiny.Count
+}
+
+$results | ForEach-Object { Write-Host $_ }
+
+# ---------------------------------------------------------------------------
+# Extra plusarg cases (see $extraCases above)
+# ---------------------------------------------------------------------------
+foreach ($c in $extraCases) {
+    $src = $tbs | Where-Object { $_.Name -eq $c.tb } | Select-Object -First 1
+    if (-not $src) {
+        $results += ('  {0,-30} testbench not found' -f $c.name); $fail++; continue
+    }
+
+    $exe = Join-Path $env:TEMP ('extra_' + ($c.tb -replace '\.v$', '.exe'))
+    $ivArgs = @('-g2005', '-o', $exe,
+                '-I', (Join-Path $SysDir 'rtl'),
+                '-y', (Join-Path $SysDir 'rtl'),
+                '-y', $SrcDir,
+                '-y', $TbDir,
+                '-y', (Join-Path $SysDir 'tb'),
+                '-y', $PrimDir)
+    if ($perTestExtra.ContainsKey($c.tb)) { $ivArgs += $perTestExtra[$c.tb] }
+    $ivArgs += $src.FullName
+
+    $cerr = (& iverilog @ivArgs 2>&1) | Where-Object { $_ -match 'error' }
+    if ($cerr) {
+        Write-Host ('  {0,-30} COMPILE FAILED' -f $c.name)
+        $cerr | Select-Object -First 2 | ForEach-Object { Write-Host ('        ' + $_) }
+        $fail++
+        continue
+    }
+
+    $vvpArgs = @($exe) + $c.plusargs
+    $out = & vvp @vvpArgs 2>&1
+    Remove-Item $exe -Force -ErrorAction SilentlyContinue
+
+    $verdict = ($out | Select-String -Pattern 'RESULT: PASS|RESULT: FAIL' | Select-Object -Last 1)
+    $vt = if ($verdict) { $verdict.Line.Trim() } else { '(no verdict)' }
+
+    if ($vt -match 'RESULT: PASS') {
+        Write-Host ('  {0,-30} {1}' -f $c.name, $vt) -ForegroundColor Green; $pass++
+    } else {
+        Write-Host ('  {0,-30} {1}' -f $c.name, $vt) -ForegroundColor Red; $fail++
+    }
+}
+
+Write-Host ''
+Write-Host ('  PASS=' + $pass + '  FAIL=' + $fail +
+            '   (' + [math]::Round(((Get-Date) - $t0).TotalSeconds,1) + ' s)')
+
+if ($fail -eq 0) {
+# ---------------------------------------------------------------------------
+# Warnings that are real but not yet fatal.
+#
+# Printed rather than silently allowed. Turning them into failures today would
+# redden the suite for reasons unrelated to the fix that added -Wall, and a suite
+# that is red for known reasons stops being read -- which is exactly how the
+# nineteen implicit declarations went unnoticed in the first place.
+if ($trackedWarn.Count -gt 0) {
+    Write-Host ''
+    Write-Host '  ---- real warnings, tracked but NOT YET fatal (see docs/45) ----' -ForegroundColor Yellow
+    $trackedWarn | ForEach-Object { Write-Host ('    ' + $_) -ForegroundColor Yellow }
+    Write-Host '    dangling input ports: a testbench left an input unconnected, so' -ForegroundColor Yellow
+    Write-Host '      that path is untested in that testbench.' -ForegroundColor Yellow
+    Write-Host '    unsized-expression clipping: a shift relied on a 65568-bit' -ForegroundColor Yellow
+    Write-Host '      intermediate and was truncated. It happens to work; that is not' -ForegroundColor Yellow
+    Write-Host '      the same as being correct.' -ForegroundColor Yellow
+}
+
+    Write-Host 'REGRESSION: PASS' -ForegroundColor Green
+    exit 0
+} else {
+    Write-Host ('REGRESSION: ' + $fail + ' FAILED') -ForegroundColor Red
+    exit 1
+}

@@ -1,0 +1,498 @@
+// ============================================================================
+// gfx_scanout.v -- framebuffer scan-out: four line banks, epoch tags, one AXI
+// burst covers TWO lines (halves the request/ack round trips), and the
+// prefetch window is eight lines deep.
+//
+// WHY FOUR BANKS AND NOT TWO
+//   With one line of look-ahead the display tolerated 14.8 us of memory latency.
+//   The engine's full-frame clear runs a multi-millisecond write stream through
+//   the same DDR controller, and a write burst cannot overlap a read on this
+//   part. Measured on the board with two banks: 26 lines per frame underran
+//   (2.4%, enough to keep shown at zero). Four banks and a two-line window
+//   double the tolerance to 29.6 us.
+//
+// LINE INTEGRITY (the reason this module exists)
+//   Readiness is latched at the start of a line and applies to the whole line.
+//   A late line is black for its entire duration, never shifted. Every line also
+//   carries the epoch of the frame it was fetched for, so a page flip can never
+//   mix two buffers inside one frame.
+// ============================================================================
+`default_nettype none
+
+module gfx_scanout #(
+    parameter H_ACT  = 1920,
+    parameter H_FP   = 88,
+    parameter H_SYNC = 44,
+    parameter H_BP   = 148,
+    parameter V_ACT  = 1080,
+    parameter V_FP   = 4,
+    parameter V_SYNC = 5,
+    parameter V_BP   = 36,
+    parameter RAM_AW = 8
+)(
+    input  wire         clk,
+    input  wire         rst_n,
+    input  wire         pclk,
+    input  wire         preset_n,
+
+    input  wire [31:0]  fb_base,
+    input  wire [15:0]  fb_stride,
+    input  wire [15:0]  fb_w,
+    input  wire [15:0]  fb_h,
+    input  wire         enable,
+    input  wire [31:0]  fb_next,
+    input  wire [31:0]  fb_seq,
+    input  wire         fb_commit,
+
+    output wire         rd_req,
+    output wire [31:0]  rd_addr,
+    output wire [8:0]   rd_beats,
+    input  wire         rd_gnt,
+    input  wire         rd_valid,
+    input  wire [127:0] rd_data,
+    input  wire         rd_last,
+
+    output reg  [31:0]  scan_accepted,
+    output reg  [31:0]  underruns,
+    output reg  [31:0]  shown,
+    output reg  [31:0]  axi_errors,
+    output reg  [31:0]  frames,
+    output reg  [15:0]  lines_last,
+    output wire         blanking,
+    output wire [31:0]  front_now,
+    output wire [10:0]  first_under,
+    output wire [10:0]  fetch_row_dbg,
+    output wire [15:0]  dbg_rd_wait_max,
+    output wire [15:0]  dbg_rd_gap_max,
+    output wire [15:0]  dbg_pf_cnt,
+    output wire [15:0]  dbg_pf_stall_max,
+
+    output reg  [23:0]  rgb,
+    output reg          de,
+    output reg          hs,
+    output reg          vs
+);
+
+    localparam H_TOTAL = H_ACT + H_FP + H_SYNC + H_BP;
+    localparam V_TOTAL = V_ACT + V_FP + V_SYNC + V_BP;
+    localparam LINE_BEATS = H_ACT / 8;
+    localparam WORDS      = LINE_BEATS;
+
+    // ------------------------------------------------------------ pclk domain
+    reg [11:0] x;
+    reg [10:0] y;
+    reg [15:0] epoch;
+    reg        row_ok;
+    reg        frame_ok;
+    reg [15:0] line_count;
+    reg [10:0] first_under_r;
+
+    // prefetch pointer: rows are issued in order, at most two ahead of the scan
+    reg [10:0] pf_next;
+    reg [15:0] fe;
+
+    reg        req_p;
+    reg [10:0] req_row_p;
+    reg [2:0]  req_rows_p;     // rows per burst request (2)
+    reg [15:0] req_epoch_p;
+    reg        req_frame_p;
+
+    reg        en_s1, en_s2;
+    reg        ack_s1, ack_s2, ack_seen;
+    reg [10:0] done_row_s1, done_row_s2;
+    reg [15:0] done_epoch_s1, done_epoch_s2;
+    reg        done_ok_s1, done_ok_s2;
+    reg [2:0]  done_rows_s1, done_rows_s2;
+
+    // SIXTEEN banks. Ti60 has 2.6 Mbit of embedded memory = 260 RAM10 blocks
+    // (not the 156 assumed earlier), so a 16-line ring costs 112 blocks and
+    // still fits. 16 is a power of two, which makes the bank index exactly
+    // row[3:0] -- no modulo counters are needed anywhere, and the underrun
+    // tolerance window grows from 8 lines (60 us) to 16 lines (120 us).
+    reg        bank_ok [0:15];
+    reg [10:0] bank_row [0:15];
+    reg [15:0] bank_epoch [0:15];
+
+    wire [3:0] scan_bank = y[3:0];                       // bank of the line being scanned
+    wire [3:0] prev_bank = y[3:0] - 4'd1;                // bank of the previous line
+    wire [3:0] pf_bank0  = pf_next[3:0];                 // banks of the next prefetch pair
+    wire [3:0] pf_bank1  = pf_next[3:0] + 4'd1;
+    reg  [3:0] req_bank0_p, req_bank1_p;                 // sent to the clk domain
+
+    wire de_raw = (x < H_ACT) && (y < V_ACT);
+    wire hs_raw = ~((x >= (H_ACT+H_FP)) && (x < (H_ACT+H_FP+H_SYNC)));
+    wire vs_raw = ~((y >= (V_ACT+V_FP)) && (y < (V_ACT+V_FP+V_SYNC)));
+
+    wire ready_row = bank_ok[scan_bank] &&
+                     (bank_row[scan_bank] == y) &&
+                     (bank_epoch[scan_bank] == epoch);
+
+    assign blanking = (y >= V_ACT);
+    assign first_under = first_under_r;
+
+    // ------------------------------------------------------------ line banks
+    wire [127:0] bank_rdata [0:15];
+    reg  [127:0] bank_wdata [0:15];
+    reg  [RAM_AW-1:0] bank_waddr [0:15];
+    reg  [15:0]  bank_we;
+    wire [RAM_AW-1:0] raddr = x[RAM_AW+2:3];
+
+    genvar gb;
+    generate
+        for (gb = 0; gb < 16; gb = gb + 1) begin : g_bank
+            simple_dual_port_ram #(
+                .DATA_WIDTH (128),
+                .ADDR_WIDTH (RAM_AW),
+                .OUTPUT_REG ("FALSE")
+            ) u_ram (
+                .wdata (bank_wdata[gb]),
+                .waddr (bank_waddr[gb]),
+                .raddr (raddr),
+                .we    (bank_we[gb]),
+                .wclk  (clk),
+                .re    (1'b1),
+                .rclk  (pclk),
+                .rdata (bank_rdata[gb])
+            );
+        end
+    endgenerate
+
+    // Read-path probes: these answer "is a line late because the first beat is
+    // slow, or because the burst gets interrupted in the middle?"
+    reg  [15:0] rd_wait_cnt, rd_wait_max;
+    reg  [15:0] pf_cnt, pf_cnt_last;
+    reg  [15:0] pf_stall_cnt, pf_stall_max;
+    reg         pf_stalled;
+    reg  [15:0] rd_gap_cnt,  rd_gap_max;
+    reg         rd_inburst;
+
+    reg [11:0] x_q;
+    reg        de_r, hs_r, vs_r;
+
+    // A row that is not ready (bank_ok / row / epoch mismatch) must read as
+    // BLACK, not as whatever the bank still held from an older frame. The stale
+    // data is what showed up as visible streaks on an underrun; forcing black
+    // makes the underrun invisible on a black field, which is the same trade the
+    // reference design documents ("the whole line is black and counted as an
+    // underrun").
+    // A row whose fetch did not finish in time should repeat the row above it
+    // instead of going black. Neighbouring scanlines of a picture are almost
+    // identical, so one duplicated line is invisible, whereas a black line on a
+    // bright picture is very obvious. The previous row lives in the bank one
+    // slot back (8 banks, rows in order), unless that bank has been reused.
+    // The duplicated line must also belong to this frame: without the epoch
+    // check a stale bank from the previous buffer could be repeated, which
+    // shows up as a torn row instead of merely a shifted one.
+    wire        prev_ok   = (bank_row[prev_bank] == (y - 11'd1)) &&
+                            (bank_epoch[prev_bank] == epoch);
+    wire [127:0] line_word = ready_row ? bank_rdata[scan_bank]
+                                       : (prev_ok  ? bank_rdata[prev_bank] : 128'd0);
+    wire [15:0]  pixel16 = line_word[{x_q[2:0], 4'b0000} +: 16];
+
+    wire [23:0] rgb16 = {pixel16[15:11], pixel16[15:13],
+                         pixel16[10:5],  pixel16[10:9],
+                         pixel16[4:0],   pixel16[4:2]};
+
+    integer bi;
+    integer di;
+    integer ci;
+
+    always @(posedge pclk) begin
+        if (!preset_n) begin
+            x <= 12'd0;
+            y <= 11'd0;
+            epoch <= 16'd0;
+            row_ok <= 1'b0;
+            frame_ok <= 1'b0;
+            line_count <= 16'd0;
+            first_under_r <= 11'h7FF;
+            pf_next <= 11'd0;
+            fe <= 16'd0;
+            req_p <= 1'b0;
+            req_row_p <= 11'd0;
+            req_rows_p <= 3'd2;
+            req_epoch_p <= 16'd0;
+            req_frame_p <= 1'b0;
+            req_bank0_p <= 4'd0; req_bank1_p <= 4'd1;
+            en_s1 <= 1'b0; en_s2 <= 1'b0;
+            ack_s1 <= 1'b0; ack_s2 <= 1'b0; ack_seen <= 1'b0;
+            done_row_s1 <= 11'd0; done_row_s2 <= 11'd0;
+            done_epoch_s1 <= 16'd0; done_epoch_s2 <= 16'd0;
+            done_ok_s1 <= 1'b0; done_ok_s2 <= 1'b0;
+            done_rows_s1 <= 3'd1; done_rows_s2 <= 3'd1;
+            for (bi = 0; bi < 16; bi = bi + 1) begin
+                bank_ok[bi] <= 1'b0;
+                bank_row[bi] <= 11'd0;
+                bank_epoch[bi] <= 16'd0;
+            end
+            x_q <= 12'd0;
+            de_r <= 1'b0; hs_r <= 1'b1; vs_r <= 1'b1;
+            rgb <= 24'd0;
+            de <= 1'b0; hs <= 1'b1; vs <= 1'b1;
+            underruns <= 32'd0;
+            shown <= 32'd0;
+            frames <= 32'd0;
+            lines_last <= 16'd0;
+        end else begin
+            en_s1 <= enable;
+            en_s2 <= en_s1;
+            ack_s1 <= ack_from_core;
+            ack_s2 <= ack_s1;
+            done_row_s1 <= done_row;   done_row_s2 <= done_row_s1;
+            done_epoch_s1 <= done_epoch; done_epoch_s2 <= done_epoch_s1;
+            done_ok_s1 <= done_ok;     done_ok_s2 <= done_ok_s1;
+            done_rows_s1 <= done_rows; done_rows_s2 <= done_rows_s1;
+
+            if (ack_s2 != ack_seen) begin
+                ack_seen <= ack_s2;
+                // bank index is row[3:0], so no bookkeeping is needed
+                bank_ok[done_row_s2[3:0]]    <= done_ok_s2;
+                bank_row[done_row_s2[3:0]]   <= done_row_s2;
+                bank_epoch[done_row_s2[3:0]] <= done_epoch_s2;
+                if (done_rows_s2 >= 3'd2) begin
+                    bank_ok[done_row_s2[3:0] + 4'd1]    <= done_ok_s2;
+                    bank_row[done_row_s2[3:0] + 4'd1]   <= done_row_s2 + 11'd1;
+                    bank_epoch[done_row_s2[3:0] + 4'd1] <= done_epoch_s2;
+                end
+            end
+
+            hs_r <= hs_raw;
+            vs_r <= vs_raw;
+            de_r <= de_raw;
+            x_q  <= x;
+            rgb  <= (de_r && row_ok) ? rgb16 : 24'd0;
+            de   <= de_r;
+            hs   <= hs_r;
+            vs   <= vs_r;
+
+            if (x == H_TOTAL - 1) begin
+                x <= 12'd0;
+                y <= (y == V_TOTAL - 1) ? 11'd0 : (y + 11'd1);
+            end else begin
+                x <= x + 12'd1;
+            end
+
+            if (x == 12'd0 && y < V_ACT) begin
+                row_ok <= ready_row;
+                if (!ready_row && en_s2) begin
+                    underruns <= underruns + 32'd1;
+                    if (first_under_r == 11'h7FF) first_under_r <= y;
+                end
+                if (y == 11'd0) frame_ok <= ready_row;
+                else if (!ready_row) frame_ok <= 1'b0;
+                line_count <= line_count + 16'd1;
+            end
+
+            if (x == 12'd0 && y == V_ACT) begin
+                frames <= frames + 32'd1;
+                lines_last <= line_count;
+                line_count <= 16'd0;
+                epoch <= epoch + 16'd1;
+                fe <= epoch + 16'd1;
+                pf_next <= 11'd0;
+                pf_cnt_last <= pf_cnt;
+                pf_cnt <= 16'd0;
+                first_under_r <= 11'h7FF;
+                if (frame_ok) shown <= shown + 32'd1;
+            end
+
+            if ((req_p == ack_s2) && !pf_stalled) begin
+                pf_stalled <= 1'b0; pf_stall_cnt <= 16'd0;
+            end else if (!pf_stalled) begin
+                pf_stalled <= 1'b1;
+            end
+            if (pf_stalled) begin
+                if (pf_stall_cnt != 16'hFFFF) pf_stall_cnt <= pf_stall_cnt + 16'd1;
+                if (pf_stall_cnt > pf_stall_max) pf_stall_max <= pf_stall_cnt;
+            end
+
+            // Two rows per burst: the DDR read then covers 7680 contiguous
+            // bytes, halving the number of request/ack round trips and giving
+            // the controller a longer contiguous stream. Both rows must sit
+            // inside the prefetch window, hence the pf_next+1 comparisons.
+            // 16 banks -> 15 lines of look-ahead (60 us -> 120 us of slack).
+            if ((req_p == ack_s2) &&
+                ((pf_next + 11'd1) < V_ACT[10:0]) &&
+                ((pf_next + 11'd1) <= ((y < V_ACT) ? (y + 11'd15) : 11'd15))) begin
+                if (pf_cnt != 16'hFFFF) pf_cnt <= pf_cnt + 16'd1;
+                req_p <= ~req_p;
+                req_row_p   <= pf_next;
+                req_rows_p  <= 3'd2;
+                req_epoch_p <= fe;
+                req_frame_p <= (pf_next == 11'd0);
+                req_bank0_p <= pf_bank0;
+                req_bank1_p <= pf_bank1;
+                pf_next <= pf_next + 11'd2;
+            end
+        end
+    end
+
+    // ------------------------------------------------------------ clk domain
+    reg        req_s1, req_s2;
+    reg [10:0] req_row_s;
+    reg [15:0] req_epoch_s;
+    reg        req_frame_s;
+    reg [2:0]  req_rows_s;
+    reg [3:0]  req_bank0_s, req_bank1_s;
+    reg        ack_from_core;
+
+    reg [3:0]  cur_bank0, cur_bank1, cur_bank;
+
+    reg [2:0]  cur_rows;
+    reg [10:0] burst_start_row;
+    reg [2:0]  done_rows;
+    reg [10:0] done_row;
+    reg [15:0] done_epoch;
+    reg        done_ok;
+
+    reg [1:0]  st;
+    reg [31:0] cur_addr;
+    reg [10:0] cur_row;
+    reg [15:0] cur_epoch;
+    reg        cur_frame;
+    reg [7:0]  widx;
+    reg        fault;
+    reg [31:0] front;
+    reg        commit_pend;
+    reg [31:0] commit_base;
+    reg [31:0] commit_seq;
+
+    assign rd_req   = (st == 2'd1);
+    assign dbg_rd_wait_max = rd_wait_max;
+    assign dbg_rd_gap_max  = rd_gap_max;
+    assign dbg_pf_cnt      = pf_cnt_last;
+    assign dbg_pf_stall_max = pf_stall_max;
+    assign rd_addr  = cur_addr;
+    assign rd_beats = LINE_BEATS;
+    assign front_now = front;
+    assign fetch_row_dbg = cur_row;
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            req_s1 <= 1'b0; req_s2 <= 1'b0;
+            req_row_s <= 11'd0; req_epoch_s <= 16'd0; req_frame_s <= 1'b0;
+            ack_from_core <= 1'b0;
+            req_rows_s <= 3'd2;
+            req_bank0_s <= 4'd0; req_bank1_s <= 4'd1;
+            cur_bank0 <= 4'd0; cur_bank1 <= 4'd1; cur_bank <= 4'd0;
+            cur_rows <= 3'd2; burst_start_row <= 11'd0;
+            done_row <= 11'd0; done_epoch <= 16'd0; done_ok <= 1'b0; done_rows <= 3'd1;
+            st <= 2'd0;
+            cur_addr <= 32'd0; cur_row <= 11'd0; cur_epoch <= 16'd0; cur_frame <= 1'b0;
+            widx <= 8'd0;
+            fault <= 1'b0;
+            front <= 32'h0800_0000;
+            commit_pend <= 1'b0; commit_base <= 32'd0; commit_seq <= 32'd0;
+            scan_accepted <= 32'd0;
+            axi_errors <= 32'd0;
+            bank_we <= 11'd0;
+            for (ci = 0; ci < 11; ci = ci + 1) begin
+                bank_waddr[ci] <= {RAM_AW{1'b0}};
+                bank_wdata[ci] <= 128'd0;
+            end
+        end else begin
+            req_s1 <= req_p;
+            req_s2 <= req_s1;
+
+            // ---- read-latency probes ----
+            if (rd_req && rd_gnt) begin
+                rd_wait_cnt <= 16'd0;
+                rd_inburst  <= 1'b1;
+            end else if (rd_inburst && !rd_valid) begin
+                if (rd_wait_cnt != 16'hFFFF) rd_wait_cnt <= rd_wait_cnt + 16'd1;
+            end
+            if (rd_inburst && rd_valid) begin
+                if (rd_wait_max == 16'd0) rd_wait_max <= rd_wait_cnt;
+                else if (rd_wait_cnt > rd_wait_max) rd_wait_max <= rd_wait_cnt;
+                rd_wait_cnt <= 16'd0;
+                rd_gap_cnt  <= 16'd0;
+                if (rd_last) rd_inburst <= 1'b0;
+            end
+            if (rd_inburst && !rd_valid) begin
+                if (rd_gap_cnt != 16'hFFFF) rd_gap_cnt <= rd_gap_cnt + 16'd1;
+                if (rd_gap_cnt > rd_gap_max) rd_gap_max <= rd_gap_cnt;
+            end
+
+            if (fb_commit) begin
+                commit_pend <= 1'b1;
+                commit_base <= fb_next;
+                commit_seq  <= fb_seq;
+            end
+
+            bank_we <= 11'd0;
+
+            case (st)
+                2'd0: begin
+                    if (req_s2 != ack_from_core) begin
+                        req_row_s   <= req_row_p;
+                        req_rows_s  <= req_rows_p;
+                        req_bank0_s <= req_bank0_p;
+                        req_bank1_s <= req_bank1_p;
+                        req_epoch_s <= req_epoch_p;
+                        req_frame_s <= req_frame_p;
+                        if (req_frame_p && commit_pend) begin
+                            front <= commit_base;
+                            scan_accepted <= commit_seq;
+                            commit_pend <= 1'b0;
+                        end
+                        if (!enable) begin
+                            fault <= 1'b1;
+                            st <= 2'd3;
+                        end else begin
+                            cur_row  <= req_row_p;
+                            cur_rows <= req_rows_s;
+                            cur_bank0 <= req_bank0_p;
+                            cur_bank1 <= req_bank1_p;
+                            cur_bank  <= req_bank0_p;
+                            burst_start_row <= req_row_p;
+                            cur_epoch <= req_epoch_p;
+                            cur_frame <= req_frame_p;
+                            cur_addr <= front + (req_row_p * {16'd0, fb_stride});
+                            widx <= 8'd0;
+                            fault <= 1'b0;
+                            st <= 2'd1;
+                        end
+                    end
+                end
+                2'd1: begin
+                    if (rd_gnt) begin
+                        widx <= 8'd0;
+                        st <= 2'd2;
+                    end
+                end
+                2'd2: begin
+                    if (rd_valid) begin
+                        if (rd_last && (widx != (WORDS[7:0] - 8'd1))) fault <= 1'b1;
+                        bank_we[cur_bank] <= 1'b1;
+                        bank_waddr[cur_bank] <= widx[RAM_AW-1:0];
+                        bank_wdata[cur_bank] <= rd_data;
+                        widx <= widx + 8'd1;
+                        if (rd_last) st <= 2'd3;
+                    end
+                end
+                2'd3: begin
+                    if (((cur_row + 11'd1) < (burst_start_row + {8'd0, cur_rows})) && !fault) begin
+                        // more rows left in this burst: read the next one
+                        cur_row  <= cur_row + 11'd1;
+                        cur_addr <= cur_addr + {16'd0, fb_stride};
+                        cur_bank <= cur_bank1;
+                        widx <= 8'd0;
+                        st <= 2'd1;
+                    end else begin
+                        done_row <= burst_start_row;
+                        done_rows <= cur_rows;
+                        done_epoch <= cur_epoch;
+                        done_ok <= ~fault;
+                        ack_from_core <= req_s2;
+                        if (enable && fault) axi_errors <= axi_errors + 32'd1;
+                        st <= 2'd0;
+                    end
+                end
+                default: st <= 2'd0;
+            endcase
+        end
+    end
+
+endmodule
+
+`default_nettype wire

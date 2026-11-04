@@ -1,0 +1,542 @@
+//============================================================================
+// tb_bitblt_sprite_walker -- P4 traversal engine, standalone
+//============================================================================
+// The walker is tested against two stubs rather than the real engines, so a
+// failure here is unambiguously the walker's:
+//
+//   dma_rd stub  : accepts one fetch_start, returns a preloaded 128-bit
+//                  descriptor after a fixed latency, then pulses done
+//   addr_gen stub: accepts blit_start, pulses done after a fixed latency
+//
+// WHAT IS CHECKED
+//   1. the fetch address sequence is table_base + i*16  (the stride is the
+//      part most likely to be silently wrong)
+//   2. every descriptor field is parsed from the right bit range
+//   3. exactly one blit_start per sprite, and exactly sprite_count of them
+//   4. the destination address is reconstructed correctly from x/y, the
+//      framebuffer base and the stride -- including a non-zero base, because
+//      with base 0 and y 0 the sum is 0 and would pass even if the multiply
+//      were missing
+//   5. src_stride == width * bytes_per_px, which is what makes each dispatched
+//      blit take P3's merged path
+//   6. fetch and blit never overlap (the shared-read-engine hazard)
+//   7. done_pulse fires once, at the end
+//============================================================================
+
+`timescale 1ns/1ps
+
+module tb_bitblt_sprite_walker;
+
+    localparam AW = 32;
+    localparam DW = 128;
+
+    reg clk = 1'b0;
+    always #5 clk = ~clk;
+
+    reg rst_n = 1'b0;
+
+    // ---------------- config ----------------
+    reg [AW-1:0] table_base   = 32'h0000_2000;
+    reg [15:0]   sprite_count = 16'd4;
+    reg          enable       = 1'b0;
+    reg [3:0]    bytes_per_px = 4'd4;
+    reg [AW-1:0] dst_stride   = 32'd2560;
+    reg [AW-1:0] fb_base      = 32'h0800_0000;
+
+    // ---------------- walker outputs ----------------
+    wire         fetch_start;
+    wire [AW-1:0] fetch_addr;
+    wire [31:0]  fetch_bytes;
+    wire         fetch_busy;
+    wire         fetch_done;
+    wire [DW-1:0] fetch_data;
+    wire         fetch_valid;
+
+    wire         blit_start;
+    wire [AW-1:0] spr_src, spr_dst, spr_src_stride;
+    wire [15:0]  spr_w, spr_h;
+    wire         blit_done;
+
+    wire         busy;
+    wire [15:0]  cur_index;
+    wire         fetch_active;
+    wire         done_pulse;
+
+    // ---------------- live state block (the real one, not a stub) ----------
+    // Using the real module rather than a stub is deliberate: the interesting
+    // behaviour is the interaction -- the walker seeds a slot on first visit
+    // and reads it thereafter -- and a stub would have to reimplement exactly
+    // that to be worth anything.
+    wire        st_init_en;
+    wire [15:0] st_init_idx, st_init_x, st_init_y, st_init_vx, st_init_vy;
+    wire [15:0] st_rd_x, st_rd_y;
+    wire        st_rd_valid, st_rd_live, st_step_en, st_frame_done;
+    // Driven by the testbench, standing in for software retiring a slot.
+    reg         lc_en  = 1'b0;
+    reg  [15:0] lc_idx = 16'd0;
+
+    // The software-visible retirement window. The instance used to hardwire
+    // rt_sel to 0 and leave rt_word open, so the only way this testbench could
+    // see the bitmap was to reach into u_state.rt -- a signal rather than an
+    // interface. Driving the real port means the test reads what a driver reads.
+    reg  [15:0] rt_sel_tb  = 16'd0;
+    wire [31:0] rt_word_tb;
+
+    bitblt_sprite_state #(.N(256), .IW(16)) u_state (
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .init_en     (st_init_en),
+        .init_idx    (st_init_idx),
+        .init_x      (st_init_x),
+        .init_y      (st_init_y),
+        .init_vx     (st_init_vx),
+        .init_vy     (st_init_vy),
+        .rd_idx      (cur_index),
+        .rd_x        (st_rd_x),
+        .rd_y        (st_rd_y),
+        .rd_valid    (st_rd_valid),
+        .rd_live     (st_rd_live),
+        .fb_w        (16'd640),
+        .fb_h        (16'd480),
+        .rt_sel      (rt_sel_tb),
+        .rt_word     (rt_word_tb),
+        .live_clr_en (lc_en),
+        .live_clr_idx(lc_idx),
+        .step_en     (st_step_en),
+        .stepping    (),
+        .frame_done  (st_frame_done),
+        // Position read-back is deliberately NOT exercised here: this testbench
+        // covers the walker, and read-back has its own testbench
+        // (tb_bitblt_posread, 9 assertions). Tied to zero EXPLICITLY rather than
+        // left dangling -- a floating input is indistinguishable from a
+        // forgotten one, and iverilog -Wall reported exactly that until this was
+        // written down.
+        .dbg_req     (1'b0),
+        .dbg_idx     (16'd0),
+        .clr_valid   (1'b0)
+    );
+
+    bitblt_sprite_walker #(.AW(AW), .DW(DW)) dut (
+        .clk            (clk),
+        .rst_n          (rst_n),
+        .table_base     (table_base),
+        .sprite_count   (sprite_count),
+        .enable         (enable),
+        .bytes_per_px   (bytes_per_px),
+        .dst_stride     (dst_stride),
+        .fb_base        (fb_base),
+        .fetch_start    (fetch_start),
+        .fetch_addr     (fetch_addr),
+        .fetch_bytes    (fetch_bytes),
+        .fetch_busy     (fetch_busy),
+        .fetch_done     (fetch_done),
+        .fetch_data     (fetch_data),
+        .fetch_valid    (fetch_valid),
+        .blit_start     (blit_start),
+        .spr_src        (spr_src),
+        .spr_dst        (spr_dst),
+        .spr_w          (spr_w),
+        .spr_h          (spr_h),
+        .spr_src_stride (spr_src_stride),
+        .blit_done      (blit_done),
+        .st_init_en     (st_init_en),
+        .st_init_idx    (st_init_idx),
+        .st_init_x      (st_init_x),
+        .st_init_y      (st_init_y),
+        .st_init_vx     (st_init_vx),
+        .st_init_vy     (st_init_vy),
+        .st_rd_x        (st_rd_x),
+        .st_rd_y        (st_rd_y),
+        .st_rd_valid    (st_rd_valid),
+        .st_rd_live     (st_rd_live),
+        .st_step_en     (st_step_en),
+        .st_frame_done  (st_frame_done),
+        .busy           (busy),
+        .cur_index      (cur_index),
+        .fetch_active   (fetch_active),
+        .done_pulse     (done_pulse)
+    );
+
+    // ================= dma_rd stub =================
+    // The table contents, as 128-bit descriptors.
+    //   desc i: src = 0x1000 + i*0x100, dst = (x=i*8, y=i*4),
+    //           size = (w=16+i, h=8+i)
+    function [127:0] desc_for;
+        input integer i;
+        reg [31:0] src;
+        reg [15:0] x, y, w, h, vx, vy;
+        begin
+            src = 32'h0000_1000 + i * 32'h100;
+            if (i == 3) begin
+                // Slot 3 exists to exercise automatic retirement. It starts
+                // just inside the 640x480 screen and moves 20 px per frame, so
+                // frame 1 draws it and frame 2 must NOT: (630+20, 470+20) is
+                // outside on both axes. Without a case like this the retirement
+                // path is never entered, and a regression that never enters it
+                // says nothing about whether it works.
+                x  = 16'd630;
+                y  = 16'd470;
+                vx = 16'd20;
+                vy = 16'd20;
+            end else begin
+                x  = i * 8;
+                y  = i * 4;
+                vx = 16'd2;
+                vy = 16'd1;
+            end
+            w   = 16 + i;
+            h   = 8 + i;
+            desc_for = {vy, vx,              // [127:112]=vy [111:96]=vx
+                        h, w,                // [95:80]=h [79:64]=w
+                        y, x,                // [63:48]=y [47:32]=x
+                        src};                // [31:0]
+        end
+    endfunction
+
+    reg [DW-1:0] slv_desc = {DW{1'b0}};
+    reg [3:0]    slv_lat  = 4'd0;
+    reg          slv_act  = 1'b0;
+    reg          slv_done = 1'b0;
+
+    assign fetch_busy  = slv_act;
+    assign fetch_done  = slv_done;
+    assign fetch_valid = slv_act && (slv_lat == 4'd0);
+    assign fetch_data  = slv_desc;
+
+    integer fetch_count = 0;
+    reg [AW-1:0] addr_seen [0:15];
+
+    // ================= addr_gen stub =================
+    reg          bl_act  = 1'b0;
+    reg [3:0]    bl_lat  = 4'd0;
+    reg          bl_done = 1'b0;
+    assign blit_done = bl_done;
+
+    integer blit_count = 0;
+
+    // ================= overlap monitor =================
+    // The whole reason the source read engine can be shared. If these two are
+    // ever high together, a real dma_rd would be driven by two masters.
+    integer overlap_cycles = 0;
+
+    // Captured dispatch parameters.
+    //
+    // DECLARED BEFORE THE always BLOCK THAT WRITES THEM. They used to sit
+    // after it, so Verilog created implicit 1-bit wires at the first use and
+    // then met a conflicting declaration. iverilog tolerated it; Questa
+    // reported "Undefined variable: cap_w" and "Formal must not be declared
+    // to be an array", ten errors, and refused the file. Same defect class as
+    // the nineteen in bitblt_top.v -- see docs/45.
+    reg [AW-1:0] cap_src [0:15];
+    reg [AW-1:0] cap_dst [0:15];
+    reg [15:0]   cap_w   [0:15];
+    reg [15:0]   cap_h   [0:15];
+    reg [AW-1:0] cap_ss  [0:15];
+
+    always @(posedge clk) begin
+        if (rst_n && fetch_active && bl_act) overlap_cycles <= overlap_cycles + 1;
+
+        // dma_rd stub
+        slv_done <= 1'b0;
+        if (fetch_start && !slv_act) begin
+            slv_desc <= desc_for(fetch_count);
+            slv_lat  <= 4'd3;
+            slv_act  <= 1'b1;
+            if (fetch_count < 16) addr_seen[fetch_count] <= fetch_addr;
+            fetch_count <= fetch_count + 1;
+        end else if (slv_act) begin
+            if (slv_lat != 4'd0) slv_lat <= slv_lat - 4'd1;
+            else begin
+                slv_act  <= 1'b0;
+                slv_done <= 1'b1;
+            end
+        end
+
+        // addr_gen stub
+        bl_done <= 1'b0;
+        if (blit_start && !bl_act) begin
+            bl_lat     <= 4'd5;
+            bl_act     <= 1'b1;
+            blit_count <= blit_count + 1;
+            // capture what was dispatched
+            if (blit_count < 16) begin
+                cap_src[blit_count] = spr_src;
+                cap_dst[blit_count] = spr_dst;
+                cap_w  [blit_count] = spr_w;
+                cap_h  [blit_count] = spr_h;
+                cap_ss [blit_count] = spr_src_stride;
+            end
+        end else if (bl_act) begin
+            if (bl_lat != 4'd0) bl_lat <= bl_lat - 4'd1;
+            else begin
+                bl_act  <= 1'b0;
+                bl_done <= 1'b1;
+            end
+        end
+    end
+
+    // captured dispatch parameters
+
+    integer errors = 0;
+    integer i;
+    reg [31:0] exp_dst;
+
+    initial begin
+        $display("");
+        $display("==================================================");
+        $display("  tb_bitblt_sprite_walker -- P4 traversal engine");
+        $display("  3 sprites, table at 0x2000, fb 0x08000000 stride 2560");
+        $display("--------------------------------------------------");
+
+        repeat (5) @(posedge clk);
+        @(negedge clk); rst_n = 1'b1;
+        repeat (3) @(posedge clk);
+
+        // ---- idle before enable ----
+        if (busy !== 1'b0) begin
+            $display("FAIL busy asserted before enable");
+            errors = errors + 1;
+        end else $display("PASS idle before enable");
+
+        // ---- go ----
+        @(negedge clk); enable = 1'b1;
+
+        // wait for done_pulse, with a guard
+        i = 0;
+        while (!done_pulse && i < 3000) begin
+            @(posedge clk);
+            i = i + 1;
+        end
+        repeat (3) @(posedge clk);
+
+        if (i >= 3000) begin
+            $display("FAIL timeout waiting for done_pulse");
+            errors = errors + 1;
+        end else $display("PASS done_pulse after %0d cycles", i);
+
+        // ---- 1. fetch address sequence ----
+        for (i = 0; i < 3; i = i + 1) begin
+            if (addr_seen[i] !== (32'h2000 + i*16)) begin
+                $display("FAIL fetch addr[%0d] = %h want %h",
+                         i, addr_seen[i], 32'h2000 + i*16);
+                errors = errors + 1;
+            end
+        end
+        if (errors == 0) $display("PASS fetch addresses 0x2000/0x2010/0x2020");
+
+        // ---- 2/4/5. dispatched parameters ----
+        for (i = 0; i < 3; i = i + 1) begin
+            if (cap_src[i] !== (32'h1000 + i*32'h100)) begin
+                $display("FAIL src[%0d] = %h want %h", i, cap_src[i], 32'h1000 + i*32'h100);
+                errors = errors + 1;
+            end
+            exp_dst = 32'h0800_0000 + (i*4) * 2560 + (i*8) * 4;
+            if (cap_dst[i] !== exp_dst) begin
+                $display("FAIL dst[%0d] = %h want %h (x=%0d y=%0d)",
+                         i, cap_dst[i], exp_dst, i*8, i*4);
+                errors = errors + 1;
+            end
+            if (cap_w[i] !== (16 + i)) begin
+                $display("FAIL w[%0d] = %0d want %0d", i, cap_w[i], 16 + i);
+                errors = errors + 1;
+            end
+            if (cap_h[i] !== (8 + i)) begin
+                $display("FAIL h[%0d] = %0d want %0d", i, cap_h[i], 8 + i);
+                errors = errors + 1;
+            end
+            if (cap_ss[i] !== ((16 + i) * 4)) begin
+                $display("FAIL src_stride[%0d] = %0d want %0d", i, cap_ss[i], (16+i)*4);
+                errors = errors + 1;
+            end
+        end
+        if (errors == 0) $display("PASS all 3 dispatches: src/dst/width/height/stride correct");
+
+        // ---- 3. counts ----
+        if (blit_count !== 4) begin
+            $display("FAIL blit_start count = %0d want 4", blit_count);
+            errors = errors + 1;
+        end else $display("PASS exactly 4 blit_start pulses");
+
+        if (fetch_count !== 4) begin
+            $display("FAIL fetch count = %0d want 4", fetch_count);
+            errors = errors + 1;
+        end else $display("PASS exactly 4 fetches");
+
+        // ---- 6. no overlap ----
+        if (overlap_cycles !== 0) begin
+            $display("FAIL fetch and blit overlapped for %0d cycles", overlap_cycles);
+            errors = errors + 1;
+        end else $display("PASS fetch never overlapped a blit (shared RE is safe)");
+
+        // ---- back to idle ----
+        if (busy !== 1'b0) begin
+            $display("FAIL busy still high after completion");
+            errors = errors + 1;
+        end else $display("PASS busy released");
+
+        // ================= SECOND FRAME: the state must have moved =========
+        //
+        // PROVEN ABLE TO FAIL, twice, because frame 1 alone cannot see any of
+        // this and a check nobody has ever seen fail is decoration:
+        //
+        //   rd_valid forced to 0 (state never appears initialised):
+        //     frame2 positions drifted wildly (08007860 vs 08000a08) -- the
+        //     slot is re-seeded every frame while the sweep keeps adding, so
+        //     the position churns instead of standing still.
+        //
+        //   frame-end sweep changed to x += 0:
+        //     frame2 was short by exactly 0x8 = 2 pixels * 4 bytes = vx. The
+        //     delta points straight at the missing term.
+        //
+        // This is the whole point of the state block. Frame 1 drew from the
+        // descriptor and seeded the state; the frame-end sweep added (vx,vy);
+        // frame 2 must draw from the NEW position. If the walker re-seeded
+        // every time -- or if rd_valid were stuck low -- every sprite would
+        // snap back to its table position and the sprites would never move.
+        // Nothing in frame 1 can detect that.
+        for (i = 0; i < 16; i = i + 1) begin
+            cap_src[i] = {AW{1'b0}};
+            cap_dst[i] = {AW{1'b0}};
+        end
+        // These two were on one line with literal backtick-r backtick-n text
+        // between them, written by a script that put "\r\n" into the file as
+        // characters instead of real newlines. iverilog accepted it; Questa
+        // reported "Macro `r is undefined". See docs/45.
+        blit_count  = 0;
+        fetch_count = 0;
+
+        @(negedge clk); enable = 1'b0;
+        repeat (3) @(posedge clk);
+        @(negedge clk); enable = 1'b1;      // fresh rising edge = next frame
+
+        i = 0;
+        while (!done_pulse && i < 3000) begin
+            @(posedge clk);
+            i = i + 1;
+        end
+        repeat (3) @(posedge clk);
+
+        if (i >= 3000) begin
+            $display("FAIL second frame timed out");
+            errors = errors + 1;
+        end else begin
+            for (i = 0; i < 3; i = i + 1) begin
+                // x advanced by vx=2, y by vy=1, both in pixels.
+                exp_dst = 32'h0800_0000 + ((i*4 + 1) * 2560) + ((i*8 + 2) * 4);
+                if (cap_dst[i] !== exp_dst) begin
+                    $display("FAIL frame2 dst[%0d] = %h want %h (state did not advance)",
+                             i, cap_dst[i], exp_dst);
+                    errors = errors + 1;
+                end
+            end
+            // ---- the retired bitmap must tell the truth ----
+            // Software's ONLY way to learn a slot is free. If this reads 0 the
+            // slot is lost forever; if it reads 1 for a slot that is still
+            // flying, software reuses a slot that is in use and two bullets
+            // share a position. Both are silent failures, so the bit is
+            // asserted here rather than trusted.
+            // Read through the software-visible contract: SPR_RT_SEL picks a
+            // 32-bit word and SPR_RT_BITS returns it. This testbench used to
+            // poke rt_word_tb[i] directly -- a signal, not an interface, and a
+            // path no driver can take. It broke as soon as the storage was
+            // reorganised, which is how the coupling surfaced. Slots 0..31 live
+            // in word 0.
+            rt_sel_tb = 16'd0;
+            repeat (2) @(posedge clk); #1;
+
+            if (rt_word_tb[3] !== 1'b1) begin
+                $display("FAIL rt_word_tb[3] = %b want 1 (slot 3 left the screen but was not published)",
+                         rt_word_tb[3]);
+                errors = errors + 1;
+            end else $display("PASS rt_word_tb[3] = 1 (retirement published to software)");
+
+            // And the slots that are still on screen must NOT be marked.
+            for (i = 0; i < 3; i = i + 1) begin
+                if (rt_word_tb[i] !== 1'b0) begin
+                    $display("FAIL rt_word_tb[%0d] = %b want 0 (still flying)", i, rt_word_tb[i]);
+                    errors = errors + 1;
+                end
+            end
+            if (errors == 0) $display("PASS rt[0..2] = 0 (only the retired slot is marked)");
+
+            // ---- automatic retirement ----
+            // Slot 3 left the screen, so frame 2 must have dispatched three
+            // blits, not four -- while still having FETCHED four descriptors,
+            // because the walk has to read a slot to learn it is dead. That
+            // gap between 4 fetches and 3 dispatches is the evidence that
+            // retirement works; a plain "fewer blits" check would also pass if
+            // the walk had simply stopped early.
+            if (blit_count !== 3) begin
+                $display("FAIL frame2 blit count = %0d want 3 (slot 3 should be retired)", blit_count);
+                errors = errors + 1;
+            end else $display("PASS frame2: retired slot not dispatched (3 blits)");
+
+            if (fetch_count !== 4) begin
+                $display("FAIL frame2 fetch count = %0d want 4 (a dead slot is still read)", fetch_count);
+                errors = errors + 1;
+            end else $display("PASS frame2: retired slot still fetched (4 fetches, 3 blits)");
+
+            if (errors == 0)
+                $display("PASS frame2: positions advanced and slot 3 auto-retired");
+
+        // ================= FRAME 3: reclaim, then relaunch ==============
+        //
+        // The loop that a bullet-hell game actually runs: launch, fly, leave
+        // the screen, get published, get reclaimed, launch again. Frame 2
+        // proved the first half; this proves the slot really comes back.
+        //
+        // THE ASSERTION THAT MATTERS is the destination of the relaunched
+        // sprite. It must be the DESCRIPTOR position (630,470), not where the
+        // previous bullet died (650,490). If reclaim left seeded set, the new
+        // bullet inherits the dead one coordinates -- which on hardware looks
+        // like bullets appearing out of nowhere.
+        @(negedge clk); lc_en = 1'b1; lc_idx = 16'd3;   // slot 3 is the one that retired
+        @(posedge clk);
+        @(negedge clk); lc_en = 1'b0;
+        // ★ The retired bitmap is behind an RMW engine plus a block RAM's
+        // registered read now (docs/86 s.25): a reclaim request costs ~3-4 cycles
+        // to write and another 2 before the software-visible word reflects it.
+        // Four cycles was enough when the bitmap was a register file written
+        // combinationally. Software polls this bitmap between frames, so the
+        // longer visibility is invisible to it -- but the testbench has to wait.
+        repeat (16) @(posedge clk);
+
+        if (rt_word_tb[3] !== 1'b0) begin
+            $display("FAIL frame3: rt[3] still set after reclaim");
+            errors = errors + 1;
+        end else $display("PASS frame3: rt[3] cleared by reclaim");
+
+        for (i = 0; i < 16; i = i + 1) cap_dst[i] = 0;
+        blit_count  = 0;
+        fetch_count = 0;
+
+        @(negedge clk); enable = 1'b0;
+        repeat (3) @(posedge clk);
+        @(negedge clk); enable = 1'b1;
+
+        i = 0;
+        while (!done_pulse && i < 5000) begin @(posedge clk); i = i + 1; end
+        repeat (5) @(posedge clk);
+
+        exp_dst = 32'h08000000 + (470 * 2560) + (630 * 4);
+        if (cap_dst[3] !== exp_dst) begin
+            $display("FAIL frame3: slot3 dst = %h want %h -- relaunch must start from the descriptor",
+                     cap_dst[3], exp_dst);
+            errors = errors + 1;
+        end else $display("PASS frame3: relaunched slot starts at its descriptor position");
+        end
+
+        $display("--------------------------------------------------");
+        if (errors == 0) $display("RESULT: PASS (walked %0d sprites)", blit_count);
+        else             $display("RESULT: FAILED with %0d error(s)", errors);
+        $display("==================================================");
+        $finish;
+    end
+
+    initial begin
+        #500_000;
+        $display("RESULT: FAILED (timeout)");
+        $finish;
+    end
+
+endmodule

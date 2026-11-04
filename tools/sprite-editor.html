@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GFX-1408 像素素材编辑器</title>
+<style>
+:root{
+  --bg:#0c0f16; --panel:#151a24; --panel2:#1c2231; --line:#2a3242;
+  --txt:#dbe4f0; --dim:#8a95a8; --accent:#5affc8; --accent2:#3cc8f0;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--txt);font:13px/1.45 Consolas,"Cascadia Mono","Microsoft YaHei",monospace;
+     display:flex;flex-direction:column;overflow:hidden;user-select:none}
+header{display:flex;align-items:center;gap:10px;padding:8px 14px;background:var(--panel);
+       border-bottom:1px solid var(--line);flex:0 0 auto;flex-wrap:wrap}
+.brand{font-weight:700;color:var(--accent);letter-spacing:.5px;margin-right:4px;white-space:nowrap}
+.brand small{color:var(--dim);font-weight:400;margin-left:8px;font-size:11px}
+button{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:6px;
+       padding:6px 10px;cursor:pointer;font:inherit;white-space:nowrap}
+button:hover{border-color:var(--accent2);color:#fff}
+button:disabled{opacity:.4;cursor:default}
+button.active{background:#0e3a33;border-color:var(--accent);color:var(--accent)}
+button.primary{background:#123a3d;border-color:#2c8d8a;color:#aef4ff}
+button.primary:hover{background:#174a4e}
+input[type=text]{background:#0b0e14;border:1px solid var(--line);color:var(--txt);
+       border-radius:6px;padding:6px 8px;font:inherit}
+input[type=range]{width:110px;accent-color:#5affc8}
+label.inline{color:var(--dim);display:flex;align-items:center;gap:6px}
+.badge{background:#0b0e14;border:1px solid var(--line);border-radius:5px;padding:3px 8px;color:var(--accent2);font-size:12px}
+main{flex:1;display:flex;min-height:0}
+aside{background:var(--panel);overflow-y:auto;flex:0 0 auto}
+#left{width:250px;border-right:1px solid var(--line)}
+#right{width:272px;border-left:1px solid var(--line)}
+.sect{padding:9px 10px 6px;border-bottom:1px solid var(--line);color:var(--dim);
+      font-size:11px;letter-spacing:.6px;text-transform:uppercase;background:#121722}
+.spr{display:flex;align-items:center;gap:9px;padding:6px 10px;cursor:pointer;
+     border-left:3px solid transparent}
+.spr:hover{background:var(--panel2)}
+.spr.active{background:#0e2a2a;border-left-color:var(--accent)}
+.spr canvas{image-rendering:pixelated;background:#07090d;border:1px solid var(--line);border-radius:3px;flex:0 0 auto}
+.spr .nm{font-size:12px;color:var(--txt);line-height:1.2}
+.spr .id{font-size:10px;color:var(--dim);line-height:1.2}
+#center{flex:1;display:flex;flex-direction:column;min-width:0}
+#toolbar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line);
+         background:var(--panel);flex-wrap:wrap}
+#toolbar label{display:flex;align-items:center;gap:6px;color:var(--dim)}
+.sep{width:1px;height:20px;background:var(--line);margin:0 3px}
+.zoomval{min-width:28px;text-align:right;color:var(--txt)}
+#cvwrap{flex:1;overflow:auto;display:flex;align-items:center;justify-content:center;padding:24px;
+  background:radial-gradient(circle at 50% 0%,#121826 0%,#090c12 72%)}
+canvas#cv{image-rendering:pixelated;cursor:crosshair;touch-action:none;background:#07090d;
+  box-shadow:0 0 0 1px var(--line),0 10px 44px rgba(0,0,0,.65)}
+#status{flex:0 0 auto;display:flex;gap:18px;align-items:center;padding:6px 14px;
+        border-top:1px solid var(--line);background:var(--panel);color:var(--dim);font-size:12px;flex-wrap:wrap}
+#status b{color:var(--txt);font-weight:600}
+#swatches{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:10px}
+.sw{border:1px solid var(--line);border-radius:6px;cursor:pointer;overflow:hidden;background:#0b0e14}
+.sw:hover{border-color:var(--accent2)}
+.sw .c{height:32px}
+.sw .t{font-size:9px;color:var(--dim);text-align:center;padding:2px 0 3px;line-height:1.35}
+.sw .hex{color:#cfd8e6}
+.sw.active{outline:2px solid var(--accent);outline-offset:-2px}
+.hint{padding:4px 12px 16px;color:var(--dim);font-size:11px;line-height:1.7}
+.hint b{color:var(--accent2)}
+kbd{background:#0b0e14;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;
+    padding:0 4px;font-size:10px;color:#cfd8e6}
+#toast{position:fixed;right:16px;bottom:16px;background:#0e2a2a;border:1px solid var(--accent);
+       color:var(--accent);padding:9px 13px;border-radius:6px;opacity:0;transition:opacity .25s;
+       pointer-events:none;max-width:420px}
+#toast.show{opacity:1}
+.dot{display:inline-block;width:9px;height:9px;border-radius:2px;vertical-align:-1px;
+     border:1px solid rgba(255,255,255,.22);margin-right:4px}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">GFX-1408 像素素材编辑器<small>sprite-editor.html</small></div>
+  <label class="inline">名称 <input type="text" id="sprName" size="20" spellcheck="false"></label>
+  <span class="badge" id="sprSize">8×8</span>
+  <span class="sep"></span>
+  <button id="btnClear">清空</button>
+  <button id="btnDup">复制素材</button>
+  <button id="btnReset">恢复初始</button>
+  <span class="sep"></span>
+  <button id="btnImport">导入 JSON</button>
+  <button id="btnExport" class="primary">下载 assets.json</button>
+  <input type="file" id="file" accept="application/json,.json" hidden>
+</header>
+<main>
+  <aside id="left"></aside>
+  <section id="center">
+    <div id="toolbar">
+      <label>画笔</label>
+      <button class="brush" data-brush="1">1px</button>
+      <button class="brush" data-brush="2">2px</button>
+      <button class="brush" data-brush="3">3px</button>
+      <span class="sep"></span>
+      <button id="btnMirror">镜像 关</button>
+      <button id="btnGrid" class="active">网格 开</button>
+      <span class="sep"></span>
+      <label>缩放 <input type="range" id="zoom" min="8" max="24" step="1" value="14">
+        <span class="zoomval" id="zoomVal">14</span><span style="font-size:10px">px</span></label>
+      <span class="sep"></span>
+      <button id="btnUndo">撤销</button>
+      <button id="btnRedo">重做</button>
+    </div>
+    <div id="cvwrap"><canvas id="cv" width="256" height="256"></canvas></div>
+    <div id="status">
+      <span>当前 <b id="stCur">-</b></span>
+      <span>坐标 <b id="stPos">-, -</b></span>
+      <span>像素 <b id="stCount">-</b></span>
+      <span>颜色 <b id="stColor">-</b></span>
+      <span id="stHint">左键上色 · 右键擦除 · <kbd>M</kbd> 镜像 · <kbd>G</kbd> 网格 · <kbd>1/2/3</kbd> 画笔 · <kbd>Ctrl+Z</kbd> 撤销</span>
+    </div>
+  </section>
+  <aside id="right">
+    <div class="sect">调色板 · 16 色（标注 RGB565）</div>
+    <div id="swatches"></div>
+    <div class="hint">
+      <b>左键</b>上色，<b>右键</b>擦除；画笔 1 / 2 / 3 像素。镜像开时左右对称，画飞船和怪物很好用。<br><br>
+      状态自动保存到 localStorage，刷新不丢。改完点右上角
+      <b>下载 assets.json</b>，用下载的文件覆盖 <b>tools/assets.json</b>，再运行
+      <b>python tools/pixelart_export.py</b> 生成 assets.h 与预览图。<br><br>
+      透明像素导出为色键 <b>0xF81F</b>。
+    </div>
+  </aside>
+</main>
+<div id="toast"></div>
+<script>
+'use strict';
+/* 初始素材文档：由 tools/gen_assets.py 注入（占位符保持可重复注入） */
+const DEFAULT_DOC = /*__DEFAULT_DOC__*/{"version":1,"title":"GFX-1408 survivor demo sprites","key":"0xF81F","palette":["#14101f","#2b2440","#5b5478","#9b95b8","#ffffff","#aef4ff","#3cc8f0","#5affc8","#b9ffe4","#ffdf4a","#ff9a20","#ff5aa0","#ffc0e0","#e32c40","#8a6bd0","#c9a6ff"],"sprites":[{"id":"A8_GEM","name":"经验宝石","size":8,"pixels":"...........77.....7887...784487..784487...7887.....77..........."},{"id":"A8_KNIFE","name":"飞刀","size":8,"pixels":"...........44.....4444....4444....3443...333333....22......22..."},{"id":"A8_ORB","name":"环绕光球","size":8,"pixels":"..........6666...655556..654456..654456..655556...6666.........."},{"id":"A8_ENEMY_A","name":"红色小怪","size":8,"pixels":"..0..0....0..0...0cccc0.0cddddc00d4dd4d00dd00dd0.0dddd0...0000.."},{"id":"A8_ENEMY_B","name":"青色尖刺怪","size":8,"pixels":"..........6..6.....66....666666.6654456666544566.666666....66..."},{"id":"A8_ENEMY_C","name":"紫色圆怪","size":8,"pixels":".........000000.0eeeeee0044ff4400eeffee00ef00fe0.000000........."},{"id":"A8_EBULLET","name":"敌方子弹","size":8,"pixels":"..........bbbb...bccccb..bc44cb..bc44cb..bccccb...bbbb.........."},{"id":"A8_HEART","name":"回血爱心","size":8,"pixels":".........dd..dd.dccddccddcddddcddddddddd.dddddd...dddd.....dd..."},{"id":"A8_SPARK","name":"火花粒子","size":8,"pixels":"...........99......94...9994499999944999...94......99..........."},{"id":"A16_ENEMY_A","name":"红色恶魔","size":16,"pixels":"....0......0........00....00........0dd..dd0........0dd..dd0........0ccddcc0.......0cddddddc0.....0cddddddddc0...0dddddddddddd0..0dd44dddd44dd0..0dd44dddd44dd0..0dddddddddddd0..0dddddddddddd0...0ddd0440ddd0.....0dddddddd0.......0dddddd0.........0dddd0....."},{"id":"A16_ENEMY_B","name":"青色尖刺怪","size":16,"pixels":".......................00.............0660........00..0660..00....060.0660.060.....0606666060.....066446644660...06664066046660..06666666666660...066666666660.....0606666060.....060.0660.060....00..0660..00........0660.............00......................."},{"id":"A16_ENEMY_C","name":"紫色圆怪","size":16,"pixels":".....................000000.........0eeeeee0.......0ffeeeeff0.....0ffeeeeeeff0...0ffeeeeeeeeff0..0ee44eeee44ee0..0ee40eeee04ee0..0eeeeeeeeeeee0..0eeeeeeeeeeee0..0eeee0000eeee0..0eeeeeeeeeeee0...0eeeeeeeeee0.....0eeeeeeee0.......0eeeeee0.........000000....."},{"id":"A16_ENEMY_BIG","name":"紫红胖子","size":16,"pixels":"......................0000...........0bbbb0.........0cbbbbc0.......0ccbbbbcc0.....0ccbbbbbbcc0...0bbbbbbbbbbbb0..0bb44bbbb44bb0..0bb40bbbb04bb0..0bbbbbbbbbbbb0..0bbbb0000bbbb0...0bbbbbbbbbb0.....0bbbbbbbb0.......0bbbbbb0.........0bbbb0...........0000......"},{"id":"A16_ENEMY_ELITE","name":"金冠精英","size":16,"pixels":"....9..99..9........99.99.99.......9999999999......0000000000.....09aaaaaaaa90...09aaaaaaaaaa90..09aaaaaaaaaa90..0a44aaaaaa44a0..0a4daaaaaad4a0..0aaaaaaaaaaaa0...0aaaaaaaaaa0....0aaaaaaaaaa0.....0aaaaaaaa0.......0aaaaaa0.........0aaaa0...........0000......"},{"id":"A32_PLAYER","name":"玩家（俯视·持武）","size":32,"pixels":"...............44.............................2442............................2442............................2442............................2442............................2442............................2442...........................224422........................0999999990..........................22..............................22...........................06699660.......................0566666650.....................066444444660....................066444444660....................066666666660....................066666666660....................066666666660....................066666666660....................000000000000................05560666666666606550............05560666666666606550............05560666666666606550.............056666666666666650...............0566666666666650.................06666666666660..................06666666666660...................066666666660....................066666666660....................066699996660.....................0666..6660......................0666..6660..........."},{"id":"A32_PLAYER_HURT","name":"玩家受击帧","size":32,"pixels":"...............44.............................d44d............................d44d............................d44d............................d44d............................d44d............................d44d...........................dd44dd........................0999999990..........................dd..............................dd...........................0dd99dd0.......................0cddddddc0.....................0dd444444dd0....................0dd444444dd0....................0dddddddddd0....................0dddddddddd0....................0dddddddddd0....................0dddddddddd0....................000000000000................0ccd0dddddddddd0dcc0............0ccd0dddddddddd0dcc0............0ccd0dddddddddd0dcc0.............0cddddddddddddddc0...............0cddddddddddddc0.................0dddddddddddd0..................0dddddddddddd0...................0dddddddddd0....................0dddddddddd0....................0ddd9999ddd0.....................0ddd..ddd0......................0ddd..ddd0..........."}]}; /*__END_DEFAULT_DOC__*/
+
+const STORAGE_KEY = 'gfx1408.sprite-editor.v1';
+const GROUP_ORDER = [8, 16, 32];
+const GROUP_LABEL = {8: '8×8 · 子弹 / 宝石 / 粒子', 16: '16×16 · 敌人', 32: '32×32 · 玩家'};
+
+const $ = function (id) { return document.getElementById(id); };
+const cv = $('cv');
+const ctx = cv.getContext('2d');
+
+let doc = null;
+let curId = null;
+let colorIdx = 0;
+let brush = 1;
+let mirror = false;
+let grid = true;
+let zoom = 14;
+let undoStack = [];
+let redoStack = [];
+let painting = false;
+let eraseMode = false;
+let strokeBefore = null;
+let saveTimer = 0;
+
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(function () { t.classList.remove('show'); }, 1800);
+}
+function clone(o) { return JSON.parse(JSON.stringify(o)); }
+function hexToRgb(h) {
+  const n = parseInt(h.slice(1), 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+function pack565(hex) {
+  const c = hexToRgb(hex);
+  return (((c.r >> 3) & 31) << 11) | (((c.g >> 2) & 63) << 5) | ((c.b >> 3) & 31);
+}
+function fmt565(v) { return '0x' + v.toString(16).toUpperCase().padStart(4, '0'); }
+
+function validDoc(d) {
+  if (!d || !Array.isArray(d.palette) || d.palette.length !== 16) return false;
+  if (!d.palette.every(function (h) { return /^#[0-9a-fA-F]{6}$/.test(h); })) return false;
+  if (!Array.isArray(d.sprites) || d.sprites.length === 0) return false;
+  const ids = {};
+  for (let i = 0; i < d.sprites.length; i++) {
+    const s = d.sprites[i];
+    if (!s || typeof s.id !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(s.id)) return false;
+    if (ids[s.id]) return false;
+    ids[s.id] = true;
+    if ([8, 16, 32].indexOf(s.size) < 0) return false;
+    if (typeof s.pixels !== 'string' || s.pixels.length !== s.size * s.size) return false;
+    for (let k = 0; k < s.pixels.length; k++) {
+      const ch = s.pixels[k];
+      if (ch !== '.' && !/^[0-9a-f]$/.test(ch)) return false;
+    }
+    if (typeof s.name !== 'string') s.name = s.id;
+  }
+  return true;
+}
+function loadDoc() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const d = JSON.parse(raw);
+      if (validDoc(d)) return d;
+    }
+  } catch (e) { /* fall through */ }
+  return clone(DEFAULT_DOC);
+}
+function saveDoc() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(doc)); } catch (e) { }
+}
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveDoc, 250);
+}
+function cur() { return doc.sprites.filter(function (s) { return s.id === curId; })[0]; }
+
+/* ---------------------------------------------------------------- list --- */
+function drawSpritePreview(canvas, s) {
+  const g = canvas.getContext('2d');
+  const n = s.size;
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const ch = s.pixels[y * n + x];
+      if (ch === '.') g.fillStyle = ((x + y) & 1) ? '#0e1118' : '#161b25';
+      else g.fillStyle = doc.palette[parseInt(ch, 16)];
+      g.fillRect(x, y, 1, 1);
+    }
+  }
+}
+function renderList() {
+  const left = $('left');
+  left.innerHTML = '';
+  for (let gi = 0; gi < GROUP_ORDER.length; gi++) {
+    const size = GROUP_ORDER[gi];
+    const list = doc.sprites.filter(function (s) { return s.size === size; });
+    const head = document.createElement('div');
+    head.className = 'sect';
+    head.textContent = GROUP_LABEL[size] + ' · ' + list.length;
+    left.appendChild(head);
+    for (let i = 0; i < list.length; i++) {
+      const s = list[i];
+      const row = document.createElement('div');
+      row.className = 'spr' + (s.id === curId ? ' active' : '');
+      row.title = s.id + ' — ' + s.name;
+      const c = document.createElement('canvas');
+      c.width = s.size; c.height = s.size;
+      drawSpritePreview(c, s);
+      const box = document.createElement('div');
+      const idDiv = document.createElement('div');
+      idDiv.className = 'id'; idDiv.textContent = s.id;
+      const nmDiv = document.createElement('div');
+      nmDiv.className = 'nm'; nmDiv.textContent = s.name;
+      box.appendChild(idDiv); box.appendChild(nmDiv);
+      row.appendChild(c); row.appendChild(box);
+      row.addEventListener('click', (function (id) {
+        return function () { selectSprite(id); };
+      })(s.id));
+      left.appendChild(row);
+    }
+  }
+}
+function selectSprite(id) {
+  curId = id;
+  const s = cur();
+  $('sprName').value = s.name;
+  $('sprSize').textContent = s.size + '×' + s.size;
+  renderList();
+  drawCanvas();
+  updateStatus();
+}
+
+/* -------------------------------------------------------------- canvas --- */
+function drawCanvas() {
+  const s = cur();
+  if (!s) return;
+  const n = s.size;
+  const z = zoom;
+  cv.width = n * z;
+  cv.height = n * z;
+  cv.style.width = (n * z) + 'px';
+  cv.style.height = (n * z) + 'px';
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      const ch = s.pixels[y * n + x];
+      if (ch === '.') ctx.fillStyle = ((x + y) & 1) ? '#0d1017' : '#151a24';
+      else ctx.fillStyle = doc.palette[parseInt(ch, 16)];
+      ctx.fillRect(x * z, y * z, z, z);
+    }
+  }
+  if (grid && z >= 8) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+    ctx.lineWidth = 1;
+    for (let i = 1; i < n; i++) {
+      const p = i * z + 0.5;
+      ctx.beginPath(); ctx.moveTo(p, 0); ctx.lineTo(p, n * z); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, p); ctx.lineTo(n * z, p); ctx.stroke();
+    }
+  }
+  ctx.strokeStyle = 'rgba(90,255,200,0.35)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(0.5, 0.5, n * z - 1, n * z - 1);
+}
+function updateStatus() {
+  const s = cur();
+  if (!s) return;
+  const used = s.pixels.replace(/\./g, '').length;
+  $('stCur').textContent = s.id;
+  $('stCount').textContent = used + ' / ' + (s.size * s.size) + ' px';
+  const hex = doc.palette[colorIdx];
+  $('stColor').innerHTML = '<span class="dot" style="background:' + hex + '"></span>' +
+    hex + ' &nbsp;' + fmt565(pack565(hex));
+  $('sprSize').textContent = s.size + '×' + s.size;
+}
+
+/* ------------------------------------------------------------ painting --- */
+function pixelFromEvent(e) {
+  const r = cv.getBoundingClientRect();
+  const x = Math.floor((e.clientX - r.left) / zoom);
+  const y = Math.floor((e.clientY - r.top) / zoom);
+  const n = cur().size;
+  if (x < 0 || y < 0 || x >= n || y >= n) return null;
+  return { x: x, y: y };
+}
+function paintCell(s, x, y, ch) {
+  const n = s.size;
+  if (x < 0 || y < 0 || x >= n || y >= n) return false;
+  const i = y * n + x;
+  if (s.pixels[i] === ch) return false;
+  s.pixels = s.pixels.slice(0, i) + ch + s.pixels.slice(i + 1);
+  return true;
+}
+function strokeAt(e) {
+  const p = pixelFromEvent(e);
+  if (!p) return;
+  const s = cur();
+  const n = s.size;
+  const ch = eraseMode ? '.' : colorIdx.toString(16);
+  const offs = brush === 1 ? [0] : (brush === 2 ? [0, 1] : [-1, 0, 1]);
+  let changed = false;
+  for (let i = 0; i < offs.length; i++) {
+    for (let j = 0; j < offs.length; j++) {
+      const x = p.x + offs[i];
+      const y = p.y + offs[j];
+      if (paintCell(s, x, y, ch)) changed = true;
+      if (mirror) {
+        if (paintCell(s, n - 1 - x, y, ch)) changed = true;
+      }
+    }
+  }
+  if (changed) {
+    drawCanvas();
+    scheduleSave();
+    updateStatus();
+  }
+}
+function endStroke() {
+  if (!painting) return;
+  painting = false;
+  const s = cur();
+  if (strokeBefore !== null && s.pixels !== strokeBefore) {
+    undoStack.push({ id: s.id, before: strokeBefore });
+    if (undoStack.length > 200) undoStack.shift();
+    redoStack = [];
+    syncToolbar();
+  }
+  strokeBefore = null;
+  renderList();
+}
+cv.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+cv.addEventListener('pointerdown', function (e) {
+  if (e.button !== 0 && e.button !== 2) return;
+  e.preventDefault();
+  painting = true;
+  eraseMode = (e.button === 2);
+  strokeBefore = cur().pixels;
+  try { cv.setPointerCapture(e.pointerId); } catch (err) { }
+  strokeAt(e);
+});
+cv.addEventListener('pointermove', function (e) {
+  const p = pixelFromEvent(e);
+  if (p) $('stPos').textContent = p.x + ', ' + p.y;
+  if (painting) strokeAt(e);
+});
+cv.addEventListener('pointerleave', function () { $('stPos').textContent = '-, -'; });
+cv.addEventListener('pointercancel', endStroke);
+window.addEventListener('pointerup', endStroke);
+window.addEventListener('blur', endStroke);
+
+/* ----------------------------------------------------------------- undo --- */
+function undo() {
+  if (!undoStack.length) { toast('没有可撤销的操作'); return; }
+  const a = undoStack.pop();
+  const s = doc.sprites.filter(function (x) { return x.id === a.id; })[0];
+  if (!s) return;
+  redoStack.push({ id: a.id, before: s.pixels });
+  s.pixels = a.before;
+  curId = a.id;
+  renderList(); drawCanvas(); updateStatus(); scheduleSave(); syncToolbar();
+}
+function redo() {
+  if (!redoStack.length) { toast('没有可重做的操作'); return; }
+  const a = redoStack.pop();
+  const s = doc.sprites.filter(function (x) { return x.id === a.id; })[0];
+  if (!s) return;
+  undoStack.push({ id: a.id, before: s.pixels });
+  s.pixels = a.before;
+  curId = a.id;
+  renderList(); drawCanvas(); updateStatus(); scheduleSave(); syncToolbar();
+}
+
+/* -------------------------------------------------------------- palette --- */
+function renderPalette() {
+  const box = $('swatches');
+  box.innerHTML = '';
+  for (let i = 0; i < doc.palette.length; i++) {
+    const hex = doc.palette[i];
+    const v = pack565(hex);
+    const d = document.createElement('div');
+    d.className = 'sw' + (i === colorIdx ? ' active' : '');
+    d.title = '#' + i + '  ' + hex + '  ' + fmt565(v);
+    d.innerHTML = '<div class="c" style="background:' + hex + '"></div>' +
+      '<div class="t"><span class="hex">' + hex + '</span><br>' + i + ' · ' + fmt565(v) + '</div>';
+    d.addEventListener('click', (function (idx) {
+      return function () { colorIdx = idx; renderPalette(); updateStatus(); };
+    })(i));
+    box.appendChild(d);
+  }
+}
+
+/* ------------------------------------------------------------- toolbar --- */
+function syncToolbar() {
+  const btns = document.querySelectorAll('.brush');
+  for (let i = 0; i < btns.length; i++) {
+    btns[i].classList.toggle('active', parseInt(btns[i].getAttribute('data-brush'), 10) === brush);
+  }
+  $('btnMirror').textContent = '镜像 ' + (mirror ? '开' : '关');
+  $('btnMirror').classList.toggle('active', mirror);
+  $('btnGrid').textContent = '网格 ' + (grid ? '开' : '关');
+  $('btnGrid').classList.toggle('active', grid);
+  $('btnUndo').disabled = undoStack.length === 0;
+  $('btnRedo').disabled = redoStack.length === 0;
+}
+const brushBtns = document.querySelectorAll('.brush');
+for (let i = 0; i < brushBtns.length; i++) {
+  brushBtns[i].addEventListener('click', (function (b) {
+    return function () { brush = b; syncToolbar(); };
+  })(parseInt(brushBtns[i].getAttribute('data-brush'), 10)));
+}
+$('btnMirror').addEventListener('click', function () { mirror = !mirror; syncToolbar(); });
+$('btnGrid').addEventListener('click', function () { grid = !grid; syncToolbar(); drawCanvas(); });
+$('zoom').addEventListener('input', function (e) {
+  zoom = parseInt(e.target.value, 10);
+  $('zoomVal').textContent = zoom;
+  drawCanvas();
+});
+$('btnUndo').addEventListener('click', undo);
+$('btnRedo').addEventListener('click', redo);
+
+/* ------------------------------------------------------------ top actions - */
+$('sprName').addEventListener('input', function (e) {
+  const s = cur();
+  if (!s) return;
+  s.name = e.target.value;
+  renderList();
+  scheduleSave();
+});
+$('btnClear').addEventListener('click', function () {
+  const s = cur();
+  if (!s) return;
+  undoStack.push({ id: s.id, before: s.pixels });
+  redoStack = [];
+  s.pixels = new Array(s.size * s.size + 1).join('.');
+  renderList(); drawCanvas(); updateStatus(); scheduleSave(); syncToolbar();
+  toast('已清空 ' + s.id);
+});
+$('btnDup').addEventListener('click', function () {
+  const s = cur();
+  if (!s) return;
+  let id = s.id + '_COPY';
+  let k = 2;
+  while (doc.sprites.some(function (x) { return x.id === id; })) { id = s.id + '_COPY' + k; k++; }
+  const n = clone(s);
+  n.id = id;
+  n.name = s.name + ' 副本';
+  const idx = doc.sprites.indexOf(s);
+  doc.sprites.splice(idx + 1, 0, n);
+  renderList();
+  selectSprite(id);
+  scheduleSave();
+  toast('已复制为 ' + id);
+});
+$('btnReset').addEventListener('click', function () {
+  if (!confirm('恢复初始图案？当前修改（含 localStorage）会被丢弃。')) return;
+  localStorage.removeItem(STORAGE_KEY);
+  doc = clone(DEFAULT_DOC);
+  undoStack = []; redoStack = [];
+  renderList(); selectSprite(doc.sprites[0].id); renderPalette(); syncToolbar();
+  toast('已恢复初始图案');
+});
+$('btnImport').addEventListener('click', function () { $('file').click(); });
+$('file').addEventListener('change', function (e) {
+  const f = e.target.files[0];
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = function () {
+    try {
+      const d = JSON.parse(r.result);
+      if (!validDoc(d)) throw new Error('JSON 结构不符合素材格式');
+      doc = d;
+      undoStack = []; redoStack = [];
+      renderList(); selectSprite(doc.sprites[0].id); renderPalette(); syncToolbar(); saveDoc();
+      toast('已导入 ' + d.sprites.length + ' 个素材');
+    } catch (err) {
+      alert('导入失败：' + err.message);
+    }
+  };
+  r.readAsText(f, 'utf-8');
+  e.target.value = '';
+});
+$('btnExport').addEventListener('click', function () {
+  const out = clone(doc);
+  out.version = 1;
+  out.key = '0xF81F';
+  const text = JSON.stringify(out, null, 2) + '\n';
+  const blob = new Blob([text], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'assets.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+  toast('已下载 assets.json — 覆盖 tools/assets.json 后运行 pixelart_export.py');
+});
+
+/* ------------------------------------------------------------- keyboard --- */
+window.addEventListener('keydown', function (e) {
+  const tag = (e.target.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea') return;
+  const k = e.key.toLowerCase();
+  if ((e.ctrlKey || e.metaKey) && k === 'z') {
+    e.preventDefault();
+    if (e.shiftKey) redo(); else undo();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
+  if (k === '1' || k === '2' || k === '3') { brush = parseInt(k, 10); syncToolbar(); }
+  else if (k === 'm') { mirror = !mirror; syncToolbar(); }
+  else if (k === 'g') { grid = !grid; syncToolbar(); drawCanvas(); }
+  else if (k === '+' || k === '=') {
+    zoom = Math.min(24, zoom + 1); $('zoom').value = zoom; $('zoomVal').textContent = zoom; drawCanvas();
+  } else if (k === '-') {
+    zoom = Math.max(8, zoom - 1); $('zoom').value = zoom; $('zoomVal').textContent = zoom; drawCanvas();
+  }
+});
+
+/* ----------------------------------------------------------------- init --- */
+function init() {
+  doc = loadDoc();
+  if (!validDoc(doc)) doc = clone(DEFAULT_DOC);
+  undoStack = []; redoStack = [];
+  renderPalette();
+  renderList();
+  selectSprite(doc.sprites[0].id);
+  syncToolbar();
+}
+init();
+</script>
+</body>
+</html>

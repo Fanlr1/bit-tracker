@@ -1,0 +1,265 @@
+//============================================================================
+// tb_video_split -- line splitting across 4 KB pages
+//============================================================================
+// WHY THIS TESTBENCH EXISTS
+//
+// ARLEN is 8 bits, so a burst carries at most 256 beats = 4096 bytes, and AXI4
+// forbids a burst from crossing a 4 KB boundary. A 1920-pixel line is 7680
+// bytes, so it CANNOT be one burst -- bitblt_video_out has to emit two, and
+// every one of them must stay inside its own 4 KB page.
+//
+// The other video testbenches cannot see any of this: tb_bitblt_video_out and
+// tb_mux_video both use 640-pixel lines, which are 2560 bytes and therefore fit
+// in a single page. They pass a single-segment line and never exercise the
+// split. That is the whole reason this file exists.
+//
+// Height is 4 lines rather than 1080: the split depends on WIDTH only, so four
+// lines prove the same property in a fraction of the simulation time.
+//
+// EXPECTED, per line, for fb_width = 1920 and fb_stride = 8192 (both 4 KB
+// multiples, as cfg_bad requires):
+//
+//   segment 0: araddr = fb_base + row*8192 +    0   arlen = 255  (256 beats)
+//   segment 1: araddr = fb_base + row*8192 + 4096   arlen = 223  (224 beats)
+//                                       total 480 beats = 1920 pixels
+//
+// and no burst may satisfy araddr[11:0] + (arlen+1)*16 > 4096.
+//============================================================================
+
+`timescale 1ns/1ps
+
+module tb_video_split;
+
+    localparam H_ACT  = 1920;
+    localparam V_ACT  = 4;
+    localparam FB_W   = 1920;
+    localparam FB_H   = 4;
+    localparam STRIDE = 8192;                       // 2 x 4096, page aligned
+    localparam BASE   = 32'h8000_0000;
+    localparam BEATS  = FB_W / 4;                   // 480 beats per line
+    // 2026-10-27: segments are 16 beats (256 B) so the scan-out releases the
+    // AXI R channel every 16 cycles instead of every 256 (see bitblt_video_out).
+    // 2026-10-27: segments are now a FIXED 64 beats (1 KB) purely to bound how
+    // long the scan-out holds the AXI R channel, NOT to split at 4 KB pages.
+    // A 1920-pixel ARGB8888 line is 480 beats -> 7 full segments + 1 of 32.
+    localparam SEG_BEATS = 64;
+    localparam NSEG      = (BEATS + SEG_BEATS - 1) / SEG_BEATS;   // 8
+    localparam ROWS   = 3;                          // lines to inspect
+
+    reg clk  = 1'b0;                                // AXI domain, 100 MHz
+    reg pclk = 1'b0;                                // pixel domain, 148.5 MHz
+    reg rst_n = 1'b0;
+
+    always #5.000  clk  = ~clk;
+    always #3.367  pclk = ~pclk;
+
+    // ---------------- DUT ----------------
+    wire [23:0] rgb;
+    wire        de, hs, vs;
+    wire [15:0] h_cnt_o, v_cnt_o;
+    wire        cfg_error;
+
+    wire [7:0]  arid;
+    wire [31:0] araddr;
+    wire [7:0]  arlen;
+    wire [2:0]  arsize;
+    wire [1:0]  arburst;
+    wire        arvalid;
+    reg         arready = 1'b0;
+
+    wire [7:0]  rid;
+    reg  [127:0] rdata = 128'd0;
+    reg  [1:0]  rresp = 2'b00;
+    reg         rlast = 1'b0;
+    reg         rvalid = 1'b0;
+    wire        rready;
+
+    reg  [31:0] cfg_fb_base   = BASE;
+    reg  [15:0] cfg_fb_width  = FB_W;
+    reg  [15:0] cfg_fb_height = FB_H;
+    reg  [15:0] cfg_fb_stride = STRIDE;
+    reg         cfg_enable    = 1'b0;
+
+    bitblt_video_out #(
+        .H_ACT   (H_ACT),
+        .V_ACT   (V_ACT),
+        .H_FP    (88),
+        .H_SYNC  (44),
+        .H_BP    (148),
+        .V_FP    (4),
+        .V_SYNC  (5),
+        .V_BP    (36),
+        .FIFO_AW (12),
+        .PIX565  (0),                     // ARGB8888: 4 KB page splitting is only
+                                          // reachable at 8 B/pixel (docs/85)
+        .AXI_ID  (8'h1E)
+    ) dut (
+        .clk           (clk),
+        .rst_n         (rst_n),
+        .pclk          (pclk),
+        .fb_base       (cfg_fb_base),
+        .fb_stride     (cfg_fb_stride),
+        .fb_width      (cfg_fb_width),
+        .fb_height     (cfg_fb_height),
+        .enable        (cfg_enable),
+        .m_axi_arid    (arid),
+        .m_axi_araddr  (araddr),
+        .m_axi_arlen   (arlen),
+        .m_axi_arsize  (arsize),
+        .m_axi_arburst (arburst),
+        .m_axi_arvalid (arvalid),
+        .m_axi_arready (arready),
+        .m_axi_rid     (rid),
+        .m_axi_rdata   (rdata),
+        .m_axi_rresp   (rresp),
+        .m_axi_rlast   (rlast),
+        .m_axi_rvalid  (rvalid),
+        .m_axi_rready  (rready),
+        .rgb           (rgb),
+        .de            (de),
+        .hs            (hs),
+        .vs            (vs),
+        .h_cnt_o       (h_cnt_o),
+        .v_cnt_o       (v_cnt_o),
+        .cfg_error     (cfg_error)
+    );
+
+    // ========================================================================
+    // AXI read slave -- accepts every burst and checks its shape
+    // ========================================================================
+    // The data returned is a don't-care: this testbench judges the ADDRESS
+    // PHASE, not the pixels (tb_bitblt_video_out does that).
+    integer errors     = 0;
+    integer ar_total   = 0;
+    integer seg_in_row = 0;         // 0 or 1 within the current line
+    integer exp_row    = 0;
+    integer checks     = 0;
+
+    integer burst_bytes;
+    integer page_off;
+
+    // beats still to return for the accepted burst
+    integer beats_left = 0;
+    integer r_gap      = 0;
+
+    wire [15:0] seg_b0   = seg_in_row * SEG_BEATS;                  // first beat of this segment
+    wire [15:0] seg_len  = (BEATS - seg_b0 > SEG_BEATS) ? SEG_BEATS : (BEATS - seg_b0);
+    wire [31:0] exp_addr = BASE + (exp_row * STRIDE) + (seg_b0 * 16);
+    wire [7:0]  exp_len  = seg_len[7:0] - 8'd1;
+
+    always @(posedge clk) begin
+        if (rst_n && arvalid && arready) begin
+            checks = checks + 1;
+
+            if (ar_total < ROWS * 2) begin
+                // --- address recurrence and alignment ---
+                if (araddr !== exp_addr) begin
+                    $display("  *** row %0d seg %0d: araddr=%08h expected %08h",
+                             exp_row, seg_in_row, araddr, exp_addr);
+                    errors = errors + 1;
+                end
+                // 2026-10-27: the rule is "a burst must not CROSS a 4 KB page",
+                // not "every burst starts on a page". 1 KB segments never cross
+                // because line starts are 8 KB aligned and 4096 = 4 x 1024.
+                if ((araddr[11:0] + ((arlen + 1) * 16)) > 4096) begin
+                    $display("  *** row %0d seg %0d: burst CROSSES 4 KB (%08h off=%0d len=%0d)",
+                             exp_row, seg_in_row, araddr, araddr[11:0], arlen);
+                    errors = errors + 1;
+                end
+
+                // --- burst length: the split point ---
+                if (arlen !== exp_len) begin
+                    $display("  *** row %0d seg %0d: arlen=%0d expected %0d",
+                             exp_row, seg_in_row, arlen, exp_len);
+                    errors = errors + 1;
+                end
+
+                // --- AXI4 4 KB rule ---
+                burst_bytes = (arlen + 1) * 16;
+                page_off    = araddr[11:0] + burst_bytes;
+                if (page_off > 4096) begin
+                    $display("  *** row %0d seg %0d: burst crosses 4 KB (%0d + %0d = %0d)",
+                             exp_row, seg_in_row, araddr[11:0], burst_bytes, page_off);
+                    errors = errors + 1;
+                end
+
+                $display("  AR %0d  row=%0d seg=%0d  addr=%08h  arlen=%0d  (%0d beats, %0d bytes)",
+                         ar_total, exp_row, seg_in_row, araddr, arlen,
+                         arlen + 1, burst_bytes);
+
+                // advance the expectation
+                if (seg_in_row == NSEG - 1) begin
+                    seg_in_row = 0;
+                    exp_row    = exp_row + 1;
+                end else begin
+                    seg_in_row = seg_in_row + 1;
+                end
+            end
+
+            ar_total   = ar_total + 1;
+            beats_left = arlen + 1;
+            r_gap      = 2;
+        end
+    end
+
+    // read data: emit the accepted number of beats, rlast on the final one
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            rvalid <= 1'b0; rlast <= 1'b0; beats_left <= 0; r_gap <= 0;
+        end else begin
+            if (rvalid && rready) rvalid <= 1'b0;
+
+            if (!rvalid) begin
+                if (beats_left > 0 && r_gap > 0) r_gap <= r_gap - 1;
+                else if (beats_left > 0) begin
+                    rvalid     <= 1'b1;
+                    rlast      <= (beats_left == 1);
+                    beats_left <= beats_left - 1;
+                end
+            end
+        end
+    end
+
+    always @(posedge clk) arready <= rst_n;
+
+    // ========================================================================
+    // stimulus
+    // ========================================================================
+    initial begin
+        repeat (10) @(posedge clk);
+        @(negedge clk); rst_n = 1'b1;
+        repeat (10) @(posedge clk);
+        @(negedge clk); cfg_enable = 1'b1;
+
+        // long enough for a few complete lines at 148.5 MHz
+        repeat (40000) @(posedge pclk);
+
+        $display("");
+        $display("==================================================");
+        $display("  tb_video_split -- 4 KB page splitting");
+        $display("  fb_width  = %0d px  = %0d bytes = %0d beats",
+                 FB_W, FB_W * 4, BEATS);
+        $display("  fb_stride = %0d", STRIDE);
+         $display("  expect    : %0d segments/line -> %0d beats each (last shorter)",
+                 NSEG, SEG_BEATS);
+        $display("  --------------------------------------------------");
+        $display("  AR bursts = %0d  (expected >= %0d)", ar_total, ROWS * NSEG);
+        $display("  AR checks = %0d", checks);
+        $display("  errors    = %0d", errors);
+        $display("  cfg_error = %0d", cfg_error);
+
+        if (errors == 0 && ar_total >= ROWS * 2 && cfg_error == 0)
+            $display("RESULT: PASS");
+        else
+            $display("RESULT: FAIL");
+        $display("==================================================");
+        $finish;
+    end
+
+    initial begin
+        #20_000_000;
+        $display("RESULT: FAIL (timeout)");
+        $finish;
+    end
+
+endmodule

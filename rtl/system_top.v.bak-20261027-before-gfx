@@ -1,0 +1,1679 @@
+//***************************************************************/
+//
+// Moudel Name    : ddr3_example_top.v
+// Version        : 1.1
+// Date Created   : 2023-02-23 10:37:59
+// Last Modified  : 2023-02-24 15:27:41
+// Abstract       : ---
+//
+//***************************************************************/
+//Modification History
+//1.initial
+//***************************************************************/
+`include "ddr3_controller/ddr3_parameter.vh"
+
+`define Efinity_Debug
+`timescale 1ps/1ps
+// `define SOFT_JTAG
+
+module system_top #
+(
+parameter                       RANK_RATIO         = 1,       // # of unique CS outputs per rank
+parameter                       CK_RATIO           = `CK_RATIO, 
+parameter                       ASYN_AXI_CLK       = `ASYN_AXI_CLK, 
+parameter                       RANKS              = `RANKS,
+parameter                       CK_WIDTH           = `CK_WIDTH,       // # of CK/CK# outputs to memory   
+parameter                       CKE_WIDTH          = `CKE_WIDTH,       // # of cke outputs
+parameter                       CS_WIDTH           = `CS_WIDTH,       // # of unique CS outputs
+parameter                       BANK_WIDTH         = `BANK_WIDTH,       // # of bank bits
+parameter                       ROW_WIDTH          = `ROW_WIDTH,       // DRAM address bus width
+parameter                       COL_WIDTH          = `COL_WIDTH,      // column address width
+parameter                       DM_WIDTH           = `DM_WIDTH,       // # of DM (data mask)
+parameter                       DQS_WIDTH          = `DQS_WIDTH,       // # of DQS (strobe)
+parameter                       DQ_WIDTH           = `DQ_WIDTH,      // # of DQ (data)
+parameter                       ODT_WIDTH          = `ODT_WIDTH,
+parameter                       DQ_CNT_WIDTH       = `DQ_CNT_WIDTH,       // = ceil(log2(DQ_WIDTH))
+parameter                       DQS_CNT_WIDTH      = `DQS_CNT_WIDTH,       // = ceil(log2(DQS_WIDTH))  
+parameter                       DRAM_WIDTH         = `DRAM_WIDTH,       // # of DQ per DQS   
+parameter                       DATA_WIDTH         = `DATA_WIDTH,
+parameter                       ADDR_WIDTH         = `ADDR_WIDTH,    
+parameter                       AXI_ID_WIDTH       = `AXI_ID_WIDTH,
+parameter                       AXI_ADDR_WIDTH     = `AXI_ADDR_WIDTH,
+parameter                       AXI_DATA_WIDTH     = `AXI_DATA_WIDTH
+)
+(
+
+   // Clock and reset ports
+   input                              axi_clk,      
+   input                              core_clk,     // CORE CLK @ 100MHz
+   input                              sdram_clk,    // SDRAM CK @ 400MHz
+   input                              rx_cal_clk,   // SDRAM CK @ 400MHz
+   input                              tx_cal_clk,   // SDRAM CK @ 400MHz
+   input                              tx_cal_clk_90edge,   // SDRAM CK @ 400MHz
+   input                              pll_locked,
+   input                              user_pll_locked,
+  //  input                              peripheralClk,
+   //&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+   output  wire                       system_uart_0_io_txd,
+   input                              system_uart_0_io_rxd,   
+   input  [3:0]                       soc_gpio_IN,
+   output [3:0]                       soc_gpio_OUT,
+   output [3:0]                       soc_gpio_OE,
+   // ==== DIAGNOSTIC LED OUTPUT (added 2026-10-12) ====================
+   // Brings clock/reset health out to the four UNUSED board LEDs (LED4..LED7),
+   // so it can be observed without trusting unstable JTAG reads.
+   //   dbg_led[3] = pll_locked        (main PLL locked)
+   //   dbg_led[2] = user_pll_locked   (user PLL locked)
+   //   dbg_led[1] = sys_rst           (1 = out of reset, 0 = held in reset)
+   //   dbg_led[0] = ddr_rstn          (1 = DDR out of reset)
+   // LED logic is active-HIGH (vendor led_ctrl.v drives 'd0 for off).
+   // Purely observational: drives nothing inside the design.
+   output [3:0]                       dbg_led,
+    // debug core ports
+`ifdef  Efinity_Debug  //&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&& 
+`ifdef SOFT_JTAG
+  input                               io_jtag_tms,
+  input                               io_jtag_tdi,
+  output  wire                        io_jtag_tdo,
+  input                               io_jtag_tck,
+`else
+  input                               jtag_inst1_CAPTURE ,
+  input                               jtag_inst1_DRCK    ,
+  input                               jtag_inst1_RESET   ,
+  input                               jtag_inst1_RUNTEST ,
+  input                               jtag_inst1_SEL     ,
+  input                               jtag_inst1_SHIFT   ,
+  input                               jtag_inst1_TCK     ,
+  input                               jtag_inst1_TDI     ,
+  input                               jtag_inst1_TMS     ,
+  input                               jtag_inst1_UPDATE  ,
+  output                              jtag_inst1_TDO     ,
+`endif 
+
+`endif  //&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+   // PLL status flags  
+   output [2:0]                       pll_shift,  
+   output [4:0]                       pll_shift_sel,
+   output                             pll_shift_ena,  
+   // memory interface ports
+   output                             ddr_ck_hi,
+   output                             ddr_ck_lo,
+   output                             ddr_reset_n,
+   output [CKE_WIDTH-1:0]             ddr_cke,     
+   output [ROW_WIDTH-1:0]             ddr_addr,
+   output [BANK_WIDTH-1:0]            ddr_ba,
+   output                             ddr_cas_n,
+
+   output [CS_WIDTH*RANK_RATIO-1:0]   ddr_cs_n,
+   output                             ddr_ras_n,
+   output                             ddr_we_n,
+   
+   input  [DQS_WIDTH-1:0]             ddr_dqs_in_hi,
+   input  [DQS_WIDTH-1:0]             ddr_dqs_in_lo,
+   input  [DQ_WIDTH-1:0]              ddr_dq_in_hi,
+   input  [DQ_WIDTH-1:0]              ddr_dq_in_lo,
+   
+   output [DQS_WIDTH-1:0]             ddr_dqs_oe,
+   output [DQS_WIDTH-1:0]             ddr_dqs_oe_n,
+   output [DQ_WIDTH-1:0]              ddr_dq_oe,  
+   output [DQS_WIDTH-1:0]             ddr_dqs_out_hi,
+   output [DQS_WIDTH-1:0]             ddr_dqs_out_lo,
+   output [DQ_WIDTH-1:0]              ddr_dq_out_hi,
+   output [DQ_WIDTH-1:0]              ddr_dq_out_lo,
+   output [DM_WIDTH-1:0]              ddr_dm_hi,
+   output [DM_WIDTH-1:0]              ddr_dm_lo,
+   output [ODT_WIDTH-1:0]             ddr_odt,
+
+   input                              system_spi_0_io_data_0_IN,
+   input                              system_spi_0_io_data_1_IN,
+   output                             system_spi_0_io_ss,
+   output                             system_spi_0_io_sclk_write,
+   output                             system_spi_0_io_data_0_OUT,
+   output                             system_spi_0_io_data_0_OE,
+   output                             system_spi_0_io_data_1_OUT,
+   output                             system_spi_0_io_data_1_OE,
+
+   // ===================== HDMI output (TMDS over LVDS) =====================
+   // The 10-bit parallel TMDS goes straight to top-level ports; the serialiser
+   // and the LVDS driver live in the pin constraints, not in RTL. The outputs
+   // are inverted to compensate for the swapped differential P/N pins on this
+   // board (verified against the official 03_hdmi_tx_demo top level).
+   //
+   // pix_clk is driven by HDMI_PLL in the .peri.xml. Efinity connects a PLL
+   // output to a same-named top-level input port, which is exactly how the
+   // official 03_hdmi_tx_demo drives its hdmi_tx_slow_clk, so no change to the
+   // port style is needed.
+   //
+   // The _TX_OE / _TX_RST ports are required by the lvds_info section of the
+   // .peri.xml (oe_name / reset_name); without them those names resolve to
+   // nothing. They are tied to constants exactly as the official design does.
+   input                              pix_clk,
+   output [9:0]                       tmds_data0_o,
+   output [9:0]                       tmds_data1_o,
+   output [9:0]                       tmds_data2_o,
+   output [9:0]                       tmds_clk_o,
+   output                             tmds_data0_TX_OE,
+   output                             tmds_data0_TX_RST,
+   output                             tmds_data1_TX_OE,
+   output                             tmds_data1_TX_RST,
+   output                             tmds_data2_TX_OE,
+   output                             tmds_data2_TX_RST,
+   output                             tmds_clk_TX_OE,
+   output                             tmds_clk_TX_RST
+
+   );
+
+
+      
+//Parameter Define
+parameter FREQ = 200;			// default is 100 MHz.  Redefine as needed.
+`ifndef SIM
+    localparam CNT_INIT = 1.5*FREQ*1000;
+`else
+    localparam CNT_INIT = 10;
+`endif    
+  localparam   AIW               = AXI_ID_WIDTH      ;
+  localparam   ADW               = AXI_DATA_WIDTH    ;
+  localparam   ABN               = AXI_DATA_WIDTH/8   ;
+  /////////////////////////////////////////////////////////
+  // Wire declarations
+  reg  [19:0]                       cnt;    
+  wire                              clk;
+  wire                              rst;
+  wire                              mmcm_locked;
+  reg                               aresetn;
+  wire                              app_sr_active;
+  wire                              app_ref_ack;
+  wire                              app_zq_ack;
+
+  wire                              cal_done;
+
+  // Slave Interface Write Address Ports
+  wire [AXI_ID_WIDTH-1:0]           s_axi_awid;
+  wire [AXI_ADDR_WIDTH-1:0]         s_axi_awaddr;
+  wire [7:0]                        s_axi_awlen;
+  wire [2:0]                        s_axi_awsize;
+  wire [1:0]                        s_axi_awburst;
+  wire [0:0]                        s_axi_awlock;
+  wire [3:0]                        s_axi_awcache;
+  wire [2:0]                        s_axi_awprot;
+  wire                              s_axi_awvalid;
+  wire                              s_axi_awready;
+   // Slave Interface Write Data Ports
+  wire [AXI_DATA_WIDTH-1:0]         s_axi_wdata;
+  wire [(AXI_DATA_WIDTH/8)-1:0]     s_axi_wstrb;
+  wire                              s_axi_wlast;
+  wire                              s_axi_wvalid;
+  wire                              s_axi_wready;
+   // Slave Interface Write Response Ports
+  wire                              s_axi_bready;
+  wire [AXI_ID_WIDTH-1:0]           s_axi_bid;
+  wire [1:0]                        s_axi_bresp;
+  wire                              s_axi_bvalid;
+   // Slave Interface Read Address Ports
+  wire [AXI_ID_WIDTH-1:0]           s_axi_arid;
+  wire [AXI_ADDR_WIDTH-1:0]         s_axi_araddr;
+  wire [7:0]                        s_axi_arlen;
+  wire [2:0]                        s_axi_arsize;
+  wire [1:0]                        s_axi_arburst;
+  wire [0:0]                        s_axi_arlock;
+  wire [3:0]                        s_axi_arcache;
+  wire [2:0]                        s_axi_arprot;
+  wire                              s_axi_arvalid;
+  wire                              s_axi_arready;
+   // Slave Interface Read Data Ports
+  wire                              s_axi_rready;
+  wire [AXI_ID_WIDTH-1:0]           s_axi_rid;
+  wire [AXI_DATA_WIDTH-1:0]         s_axi_rdata;
+  wire [1:0]                        s_axi_rresp;
+  wire                              s_axi_rlast;
+  wire                              s_axi_rvalid;
+
+  // ==========================================================================
+  // BitBlt accelerator integration
+  // ==========================================================================
+  // s_axi_* (declared above) is now the M side of Axi_Mux, feeding ddr3_top.
+  // soc_ddrA_* carries the SoC DDR master into Axi_Mux slave port 0.
+  // bl1_/bl2_ are the two read engines, bl3_ the write engine.
+  //
+  // LOCK WIDTH: the SoC and the DDR3 controller both use a 1-bit awlock/arlock
+  // (standard AXI4) while Axi_Mux uses 2 bits. The widening is written out
+  // explicitly rather than left to implicit rules -- a silent truncation would
+  // compile cleanly and only misbehave at runtime.
+  // ==========================================================================
+
+  // ---- SoC DDR master -> Axi_Mux port 0 ----
+  wire [7:0]        soc_ddrA_awid;
+  wire [31:0]       soc_ddrA_awaddr;
+  wire [7:0]        soc_ddrA_awlen;
+  wire [2:0]        soc_ddrA_awsize;
+  wire [1:0]        soc_ddrA_awburst;
+  wire              soc_ddrA_awlock;
+  wire [3:0]        soc_ddrA_awcache;
+  wire [2:0]        soc_ddrA_awprot;
+  wire [3:0]        soc_ddrA_awqos;
+  wire              soc_ddrA_awvalid;
+  wire              soc_ddrA_awready;
+  wire [127:0]      soc_ddrA_wdata;
+  wire [15:0]       soc_ddrA_wstrb;
+  wire              soc_ddrA_wlast;
+  wire              soc_ddrA_wvalid;
+  wire              soc_ddrA_wready;
+  wire [7:0]        soc_ddrA_bid;
+  wire [1:0]        soc_ddrA_bresp;
+  wire              soc_ddrA_bvalid;
+  wire              soc_ddrA_bready;
+  wire [7:0]        soc_ddrA_arid;
+  wire [31:0]       soc_ddrA_araddr;
+  wire [7:0]        soc_ddrA_arlen;
+  wire [2:0]        soc_ddrA_arsize;
+  wire [1:0]        soc_ddrA_arburst;
+  wire              soc_ddrA_arlock;
+  wire [3:0]        soc_ddrA_arcache;
+  wire [2:0]        soc_ddrA_arprot;
+  wire [3:0]        soc_ddrA_arqos;
+  wire              soc_ddrA_arvalid;
+  wire              soc_ddrA_arready;
+  wire [127:0]      soc_ddrA_rdata;
+  wire [7:0]        soc_ddrA_rid;
+  wire [1:0]        soc_ddrA_rresp;
+  wire              soc_ddrA_rlast;
+  wire              soc_ddrA_rvalid;
+  wire              soc_ddrA_rready;
+
+  // ---- bitblt read engine 0 (source) -> Axi_Mux port 1 (AR/R only) ----
+  wire [7:0]        bl1_arid;
+  wire [31:0]       bl1_araddr;
+  wire [7:0]        bl1_arlen;
+  wire [2:0]        bl1_arsize;
+  wire [1:0]        bl1_arburst;
+  wire              bl1_arvalid;
+  wire              bl1_arready;
+  wire [7:0]        bl1_rid;
+  wire [127:0]      bl1_rdata;
+  wire [1:0]        bl1_rresp;
+  wire              bl1_rlast;
+  wire              bl1_rvalid;
+  wire              bl1_rready;
+
+  // ---- bitblt read engine 1 (destination) -> Axi_Mux port 2 (AR/R only) ----
+  wire [7:0]        bl2_arid;
+  wire [31:0]       bl2_araddr;
+  wire [7:0]        bl2_arlen;
+  wire [2:0]        bl2_arsize;
+  wire [1:0]        bl2_arburst;
+  wire              bl2_arvalid;
+  wire              bl2_arready;
+  wire [7:0]        bl2_rid;
+  wire [127:0]      bl2_rdata;
+  wire [1:0]        bl2_rresp;
+  wire              bl2_rlast;
+  wire              bl2_rvalid;
+  wire              bl2_rready;
+
+  // ---- bitblt write engine -> Axi_Mux port 3 (AW/W/B only) ----
+  wire [7:0]        bl3_awid;
+  wire [31:0]       bl3_awaddr;
+  wire [7:0]        bl3_awlen;
+  wire [2:0]        bl3_awsize;
+  wire [1:0]        bl3_awburst;
+  wire              bl3_awvalid;
+  wire              bl3_awready;
+  wire [127:0]      bl3_wdata;
+  wire [15:0]       bl3_wstrb;
+  wire              bl3_wlast;
+  wire              bl3_wvalid;
+  wire              bl3_wready;
+  wire [7:0]        bl3_bid;
+  wire [1:0]        bl3_bresp;
+  wire              bl3_bvalid;
+  wire              bl3_bready;
+
+  // ---- register file AXI slave, wired to the SoC's axiA port ----
+  wire [7:0]        reg_awid;
+  wire [31:0]       reg_awaddr;
+  wire [7:0]        reg_awlen;
+  wire [2:0]        reg_awsize;
+  wire [1:0]        reg_awburst;
+  wire              reg_awlock;
+  wire [3:0]        reg_awcache;
+  wire [2:0]        reg_awprot;
+  wire [3:0]        reg_awqos;
+  wire [3:0]        reg_awregion;
+  wire [3:0]        dbg_observ;      // DEBUG 2026-10-13 (see GPIO wiring below)
+  wire [3:0]        ar_dbg_arb;      // DEBUG 2026-10-17: Axi_Mux AR arbitration state
+
+  // ==========================================================================
+  // IN-FLIGHT READ COUNTERS (2026-10-17, docs/90 判据 A)
+  //
+  // If AR completions and R-burst completions drift apart -- one extra R, or an AR
+  // whose data never comes -- the info FIFO that routes the R bus falls out of step
+  // and every later read waits. That is the working hypothesis for the slow state.
+  //
+  // 判据 B from docs/90 (compare the FIFO channel against M_R_Id) is UNMEASURABLE
+  // here: ID_MODE_SEL is Normal, so MASTER_ID_WIDTH == SLAVE_ID_WIDTH and M_R_Id
+  // carries no channel number at all.
+  //
+  // What IS measurable is the bookkeeping: count AR handshakes and RLAST handshakes.
+  // In steady state the difference is the reads in flight, a small constant. A
+  // sticky flag latches if it ever exceeds INFLIGHT_MAX, which would mean the two
+  // sides are not tracking each other.
+  // ==========================================================================
+  localparam [31:0] INFLIGHT_MAX = 32'd16;
+  reg [31:0] ar_done_cnt, rlast_done_cnt;
+  reg        inflight_hi;
+  always @(posedge user_clk or negedge sys_rst) begin
+      if (!sys_rst) begin
+          ar_done_cnt    <= 32'd0;
+          rlast_done_cnt <= 32'd0;
+          inflight_hi    <= 1'b0;
+      end else begin
+          if (s_axi_arvalid && s_axi_arready)              ar_done_cnt    <= ar_done_cnt    + 32'd1;
+          if (s_axi_rvalid && s_axi_rready && s_axi_rlast) rlast_done_cnt <= rlast_done_cnt + 32'd1;
+          if ((ar_done_cnt - rlast_done_cnt) > INFLIGHT_MAX) inflight_hi   <= 1'b1;
+      end
+  end
+  wire [3:0]        dbg_rd_state;    // DEBUG 2026-10-17: {rd_src.state, rd_dst.state}
+  wire              reg_awvalid;
+  wire              reg_awready;
+  wire [31:0]       reg_wdata;
+  wire [3:0]        reg_wstrb;
+  wire              reg_wlast;
+  wire              reg_wvalid;
+  wire              reg_wready;
+  wire [7:0]        reg_bid;
+  wire [1:0]        reg_bresp;
+  wire              reg_bvalid;
+  wire              reg_bready;
+  wire [7:0]        reg_arid;
+  wire [31:0]       reg_araddr;
+  wire [7:0]        reg_arlen;
+  wire [2:0]        reg_arsize;
+  wire [1:0]        reg_arburst;
+  wire              reg_arlock;
+  wire [3:0]        reg_arcache;
+  wire [2:0]        reg_arprot;
+  wire [3:0]        reg_arqos;
+  wire [3:0]        reg_arregion;
+  wire              reg_arvalid;
+  wire              reg_arready;
+  wire [7:0]        reg_rid;
+  wire [31:0]       reg_rdata;
+  wire [1:0]        reg_rresp;
+  wire              reg_rlast;
+  wire              reg_rvalid;
+  wire              reg_rready;
+  wire              blt_interrupt;
+
+  // ---- video scan-out path (Axi_Mux slave port 4) ----
+  wire [7:0]        vid_arid;
+  wire [31:0]       vid_araddr;
+  wire [7:0]        vid_arlen;
+  wire [2:0]        vid_arsize;
+  wire [1:0]        vid_arburst;
+  wire              vid_arvalid;
+  wire              vid_arready;
+  wire [7:0]        vid_rid;
+  wire [127:0]      vid_rdata;
+  wire [1:0]        vid_rresp;
+  wire              vid_rlast;
+  wire              vid_rvalid;
+  wire              vid_rready;
+
+  // ---- scan-out configuration, driven by the register file ----
+  wire [31:0]       vid_fb_base;
+  wire [15:0]       vid_rd_row;      // DEBUG 2026-10-25: framebuffer row being fetched
+  wire [12:0]       vid_v_cnt;       // DEBUG 2026-10-25: scan-out line counter
+  wire [15:0]       vid_fb_width;
+// ---- scan-out blanking, synchronised from the pixel domain ----
+// o_blanking is generated in the pclk domain. Registers live in the clk domain,
+// so it crosses. It is ONE BIT, which is why two flops are enough: a multi-bit
+// value would need Gray coding or a handshake to avoid reading a torn word,
+// and software does not need a line number -- it needs to know whether it may
+// write FB_CFG right now.
+wire              vid_blanking;          // pclk domain, from video_out
+reg               scan_blanking_meta;
+reg               scan_blanking;         // clk domain, safe to expose
+
+// ---- scan-out starvation, synchronised from the pixel domain ----
+// Two different crossings, because the two signals have different widths:
+//
+//   sticky : ONE bit. Two flops are genuinely sufficient.
+//   count  : EIGHT bits. Two flops are NOT sufficient -- the bits would cross
+//            on independent flops and software could read a value that was
+//            never true (0x7F becoming 0x80 through 0xFF, for instance). It is
+//            sampled by waiting for the value to be unchanged across
+//            consecutive clk edges, which needs no handshake and cannot produce
+//            a torn reading: a value that has stopped moving is a real value.
+wire             vid_short;              // pclk domain
+wire [31:0]      vid_short_count;        // pclk domain (was [7:0] -- docs/64)
+// ---- observability (2026-10-27), pixel domain -> clk domain ----
+wire [31:0]      vid_underruns;
+wire [31:0]      vid_shown;
+wire [31:0]      vid_axi_errors;      // already in clk domain (video_out)
+reg  [31:0]      und_s0, und_s1, und_stable;
+reg  [31:0]      shown_s0, shown_s1, shown_stable;
+
+reg              scan_short_meta;
+reg              scan_short;             // clk domain
+reg  [31:0]      short_s0, short_s1, short_stable;
+// 2026-10-14: scan-out self-proof. Both cross pclk -> clk with the same
+// stable-sample scheme as short_count. They change once per FRAME (1.67M cycles
+// apart at 60 Hz), so "accept when two consecutive samples agree" always finds
+// a settled value -- unlike short_count, which moves continuously.
+wire [15:0]      vid_lines_last;         // pclk domain
+wire [31:0]      vid_frames;             // pclk domain
+reg  [15:0]      lines_s0, lines_s1, lines_stable;
+reg  [31:0]      frames_s0, frames_s1, frames_stable;
+  wire [15:0]       vid_fb_height;
+  wire [15:0]       vid_fb_stride;
+  wire              vid_fb_enable;
+
+  // ---- video path ----
+  wire [23:0]       vid_rgb;
+  wire              vid_de, vid_hs, vid_vs;
+  wire              vid_cfg_error;   // video scan-out configuration invalid
+  wire [9:0]        tmds_data0, tmds_data1, tmds_data2, tmds_clk;
+
+  // Axi_Mux drives 2-bit LOCK on its master side while ddr3_top expects the
+  // standard 1 bit. Carried through an explicit 2-bit net and truncated with an
+  // assign so the narrowing is visible rather than implicit.
+  wire [1:0]        m_awlock_2b;
+  wire [1:0]        m_arlock_2b;
+  assign            s_axi_awlock = m_awlock_2b[0];
+  assign            s_axi_arlock = m_arlock_2b[0];
+
+
+//***************************************************************************
+  wire [2:0]                        vio_pll_shift;  
+  wire [4:0]                        vio_pll_shift_sel;
+  wire                              vio_pll_shift_ena; 
+  wire                              pos_pll_shift_ena; 
+  wire [2:0]                        phy_pll_shift;  
+  wire [4:0]                        phy_pll_shift_sel;
+  wire                              phy_pll_shift_ena; 
+  wire                              ddr_reset; 
+  wire                              sys_rst;
+  wire  [2:0]                       phy_wr_pll_shift;
+  wire                              idelay_ld       ;
+  wire                              mpr_rdlvl_dly   ;
+  wire  [7:0]                       wrlvl_dq_check  ;
+  wire  [7:0]                       rd_level_dqs_check;  
+  wire  [2:0]                       rdlvl_shift;  
+  wire  [2:0]                       wrlvl_shift;  
+  wire  [15:0]                      debug_fifo;  
+  wire  [15:0]                      overflow_fifo;  
+  wire  [6:0]                       init_cur_state;  
+  wire  [35:0]                      ddr_debug_port;  
+  wire                              app_rdy;  
+  wire                              user_clk;  
+  wire                              ddr_rstn;  
+  wire                                phy_rddata_valid;
+  wire [2*CK_RATIO*DQ_WIDTH-1:0]      phy_rd_data;
+  wire [2*CK_RATIO*DATA_WIDTH-1:0]    app_rd_data_to_axi; 
+  wire                                app_rd_data_end;
+  wire                                app_rd_data_valid;
+  wire [2*CK_RATIO*DQ_WIDTH-1:0]      rd_data;          
+  wire                                rd_data_en;            
+  wire                                rd_data_end;   
+   
+  
+// Start of User Design top instance
+//***************************************************************************
+// The User design is instantiated below. The memory interface ports are
+// connected to the top-level and the application interface ports are
+// connected to the traffic generator module. This provides a reference
+// for connecting the memory controller to system.
+//***************************************************************************
+always @(posedge user_clk or negedge sys_rst) begin
+	if (!sys_rst)
+		cnt <= 0;
+    else if (cnt != CNT_INIT) 
+        cnt <= cnt + 20'd1;
+	else 
+        cnt <= cnt;
+end
+assign ddr_rstn = (cnt == CNT_INIT);
+
+
+generate
+if (ASYN_AXI_CLK) begin
+assign user_clk = axi_clk;
+
+end else begin
+assign user_clk = core_clk;
+end
+endgenerate
+//***************************************************************************
+// The traffic generation module instantiated below drives traffic (patterns)
+// on the application interface of the memory controller
+//***************************************************************************
+//***************************************************************************
+
+assign sys_rst       = pll_locked & user_pll_locked;
+
+// ==========================================================================
+// R-CHANNEL WATCHDOG (2026-10-17) -- the fix for the board's "slow state"
+//
+// SYMPTOM. On most power-ups the board enters a permanent slow state where every
+// sprite fetch costs ~13.75 M cycles instead of ~1,460 (hw=440,002,xxx for the
+// 8-frame animation instead of ~3,700). fill is unaffected.
+//
+// MECHANISM (measured; the GPIO probe at line ~797 reads r_cnl=0, rd0_rr=0,
+// rd1_rr=0 in a slow run, and the notes at line ~786 record the rest):
+//   1. A read is issued and Axi_Mux forwards its AR to the DDR controller.
+//   2. The controller is IN-ORDER: it owes the R data for that read before it
+//      accepts any further AR.
+//   3. The R data arrives but the SoC channel does not take it (rready = 0).
+//      AXI forbids dropping the data, so the controller waits -- indefinitely.
+//   4. Both bitblt read engines now wait forever for an AR that is never
+//      accepted; every sprite fetch hits the 65,535-cycle handshake timeout.
+//
+// docs/63 and docs/68 closed two other routes into step 3 (burst admission on
+// the read engines, and on scan-out). This one is on the SoC's channel, which is
+// vendor IP and cannot be modified -- but it does not have to be, because the
+// deadlock only persists while NOTHING consumes that data.
+//
+// WHAT THIS DOES. If the SoC channel refuses presented R data for 10 ms, the
+// ready seen by Axi_Mux is forced high: the burst completes, the mux's info FIFO
+// pops, and the in-order controller moves on. The engines recover immediately.
+//
+// COST. The SoC misses that one burst. A SoC that missed a read is strictly
+// better than a SoC (and an engine) that is wedged forever, and 10 ms is far
+// longer than any legitimate backpressure here -- scan-out alone consumes a line
+// every ~14.8 us, and the whole sprite read path completes in ~1,460 cycles.
+// ==========================================================================
+localparam [27:0] SOC_R_HANG_LIMIT = 28'd1_000_000;      // 10 ms at 100 MHz
+reg [27:0] soc_r_hang;
+always @(posedge user_clk or negedge sys_rst) begin
+    if (!sys_rst)                                  soc_r_hang <= 28'd0;
+    else if (soc_ddrA_rvalid && !soc_ddrA_rready)  soc_r_hang <= (soc_r_hang == SOC_R_HANG_LIMIT)
+                                                                 ? soc_r_hang : soc_r_hang + 28'd1;
+    else                                           soc_r_hang <= 28'd0;
+end
+wire soc_r_forced        = (soc_r_hang == SOC_R_HANG_LIMIT);
+wire soc_ddrA_rready_eff = soc_ddrA_rready | soc_r_forced;
+
+// ==========================================================================
+// DEBUG OBSERVATION MUX (2026-10-17) -- an observation point that DISCRIMINATES
+//
+// The probe added earlier tonight ({r_cnl_num, rd1_rready, rd0_rready}) read 0x0
+// in BOTH the slow and the normal state, so it could not tell them apart and any
+// conclusion drawn from it was unfounded. This mux exposes the handshake pairs
+// that actually decide the outcome, one 4-bit group at a time.
+//
+// Software writes GPIO output bits [1:0] to select, then reads GPIO input:
+//   sel 0: {s_axi_arready,  s_axi_arvalid,  s_axi_rready,  s_axi_rvalid}  (DDR side)
+//   sel 1: {soc_ddrA_arready, soc_ddrA_arvalid,
+//           soc_ddrA_rready,  soc_ddrA_rvalid}                          (SoC side)
+//   sel 2: {s_axi_awready,  s_axi_awvalid,  s_axi_wready,  s_axi_wvalid} (DDR write side)
+//   sel 3: {soc_r_forced,   s_axi_bready,   s_axi_bvalid,  1'b0}         (watchdog + B)
+//
+// sel 0 vs sel 1 is the decisive comparison: if the mux holds arvalid high while
+// the DDR controller holds arready low, the controller is refusing; if the SoC
+// side shows rvalid high with rready low, a channel is not taking its data.
+// ==========================================================================
+// Moved up from the Axi_Mux instantiation: the observation mux needs these.
+// ar_cnl_num is the value Axi_Mux_Addr_Ctrl latched when it granted the AR bus;
+// if it stops changing while a channel still asserts ARVALID, the arbiter is
+// stuck holding that channel (the 2026-10-13 hypothesis, never yet observed).
+wire [2:0] ar_cnl_num;
+wire [2:0] r_cnl_num;
+wire [1:0] obs_sel = soc_gpio_OUT[1:0];
+reg  [3:0] obs_val;
+always @(*) begin
+    case (obs_sel)
+        // 2026-10-25 sel0: the SCAN-OUT LINE SEGMENT (v_cnt[11:8]).
+        // Paired with sel1 (rd_row[11:8]) this is the whole test: v_cnt must walk
+        // 0..4 once per frame (1125 lines), and rd_row must walk the same span in
+        // step with it. If rd_row runs past 4 the scan-out is reading memory past
+        // the framebuffer, which is exactly what puts stale content on screen.
+        2'd0:    obs_val = vid_v_cnt[11:8];
+        // sel1: the ENGINE side of the AR handshake, to pair with sel0 (DDR side).
+        // {bl1_arvalid, bl1_arready, bl2_arvalid, bl2_arready} -- rd0 = source read
+        // (mux S1), rd1 = destination read (mux S2). If a slow run shows
+        // bl1_arvalid=1 while sel0 shows s_axi_arvalid=0, the mux is not
+        // forwarding a request that is definitely being made.
+        // sel1 (2026-10-17): WHICH CHANNEL OWNS THE R BUS.
+        // The AR side already proved healthy (ARs rotate between the engines), and
+        // orphan absorption did NOT fix the slow state -- so R_Act_Cnl_List is not
+        // zero; the mux is holding R data for a channel whose rready is low.
+        // This says which one: 0 = SoC, 1 = rd0 source, 2 = rd1 destination.
+        // {r_cnl_num[2:0], 1'b0}
+        // sel1 (2026-10-17): in-flight read bookkeeping, docs/90 判据 A.
+        //   bit3 = sticky "in-flight exceeded 16"
+        //   bits2..0 = r_cnl_num (which channel the R bus is routed to right now)
+        // If bit3 is set during a slow run, AR completions and R-burst completions
+        // have drifted apart -- the info FIFO that routes R is out of step.
+        // 2026-10-25: rd_row[11:8] -- the 256-line segment the AXI side is
+        // fetching. Healthy: it walks 0,1,2,3,4 once per frame in step with the
+        // scan. If it parks or jumps, the framebuffer row is no longer tied to the
+        // screen row, which is exactly the 'same screen regions keep old content'
+        // symptom.
+        2'd1:    obs_val = vid_rd_row[11:8];
+        // sel2: the two read-engine FSMs  {rd_src.state, rd_dst.state}
+        // IDLE=0 AR=1 RD=2 DONE=3. A slow run showing both engines parked in
+        // the same state names the wait that never completes.
+        2'd2:    obs_val = dbg_rd_state;
+        // sel3: the pixel path itself -- what the engines actually have.
+        // {px_in_ready, px_in_valid, rd_dst_valid, rd_src_valid}. If a slow run
+        // shows rd_src_valid=1 with rd_dst_valid=0, the destination reader is
+        // starved and the pixel engine will not consume either FIFO.
+        // sel3 (2026-10-17): THE AR ARBITRATION STATE -- the observation point
+        // Axi_Mux_04 was built for in 2026-10-13 and never wired up.
+        //   bit0 = Sta_Cnl_Switch  bit1 = Act_Cnl_Hit
+        //   bit2 = Cnl_Search_En   bit3 = M_A_End
+        // A healthy arbiter cycles through these; a stuck one parks in ACT with
+        // no hit and no end.
+        // sel3 (2026-10-17): the four busy bits of the top-level engine, so the
+        // timeout snapshot carries them together with sel2's read-engine FSMs.
+        //   bit0 = addr_busy  bit1 = rd_src_busy  bit2 = rd_dst_busy  bit3 = wr_busy
+        // sel3 (2026-10-17): THE AR CONTENTION -- scan-out (S4) versus the CPU (S0).
+        // The 2026-10-13 note in this file records this exact starvation mechanism
+        // under priority arbitration: a master that polls continuously starves the
+        // DMA channels. Arbitration is round-robin now, yet scan-out is still starved
+        // by 8.6e8 pixel clocks and completes only ~10.6 frames/s -- so the question
+        // is whether scan-out is asking for the bus at all, and whether the arbiter
+        // answers when it does.
+        //   bit0 = vid_arvalid       bit1 = vid_arready
+        //   bit2 = soc_ddrA_arvalid  bit3 = soc_ddrA_arready
+        // sel3 (2026-10-17, second revision): THE R SIDE. The AR side showed no
+        // contention worth chasing, and the monitor reports NO handshake timeout in
+        // a slow run while both read engines sit IDLE 32/32 -- so the 3.7 M cycles
+        // per blit are spent waiting on the CPU's own register reads (~1,865 cycles
+        // each against ~10 normally). That points at the R channel: whoever holds it
+        // decides how long everyone else waits. r_cnl_num reads 4 (scan-out), and the
+        // DDR side shows rready=0, i.e. nobody is accepting the data it has.
+        //   bit0 = vid_rvalid      bit1 = vid_rready      (scan-out)
+        //   bit2 = soc_ddrA_rvalid bit3 = soc_ddrA_rready (CPU)
+        // sel3 (2026-10-17): THE AR ARBITRATION STATE, now that the picture is
+        // clear. Four runs agree: hw=3.813 M (+-0.01%), to=444 every time, both read
+        // engines driving ARVALID (eng=0x8) while the DDR side sees arvalid=0 with
+        // arready=1. So the mux is not forwarding requests it can definitely see.
+        // The 1024-cycle release added earlier only fires in S_ADDR_ACT; if the
+        // arbiter is IDLE it never triggers, which would explain why that fix did
+        // nothing. These four bits say which state it is actually in.
+        //   bit0 = Sta_Cnl_Switch  bit1 = Act_Cnl_Hit
+        //   bit2 = Cnl_Search_En   bit3 = M_A_End
+        // sel3 (2026-10-17): the pixel path again, now that the AR arbiter reads
+        // IDLE with no request pending -- the wait is upstream of the bus.
+        //   bit0 = rd_src_valid  bit1 = rd_dst_valid
+        //   bit2 = px_in_valid   bit3 = px_in_ready
+        default: obs_val = dbg_observ;
+    endcase
+end
+
+
+
+// ==== SoC POWER-ON RESET (added 2026-10-12) =================================
+// The Sapphire SoC derives its internal system reset (systemCd_logic_outputReset)
+// from io_asyncReset, passed through an async-assert / sync-deassert cell. That
+// cell needs a *falling edge* on io_asyncReset to emit a reset pulse.
+//
+// io_asyncReset used to be wired straight to !pll_locked. If the PLLs are
+// already locked by the time the FPGA finishes configuring, that signal is 0
+// from the very first clock and the pulse never happens -- so every peripheral
+// register keeps its power-up value.
+//
+// Measured symptom (2026-10-12): UART CLOCK_DIVIDER read back 0x00000000 even
+// though soc.v programs 0x0000006B on reset, and no APB peripheral could be
+// written (UART / SPI / GPIO / CLINT all read back 0, while RAM writes were
+// perfect). Holding io_asyncReset high for 65536 user_clk cycles after
+// configuration guarantees the SoC always sees one clean reset pulse.
+reg [15:0] soc_por_cnt = 16'h0000;
+
+always @(posedge user_clk) begin
+    if (soc_por_cnt != 16'hFFFF)
+        soc_por_cnt <= soc_por_cnt + 16'd1;
+end
+
+wire soc_por_done  = (soc_por_cnt == 16'hFFFF);
+
+// ==========================================================================
+// 2026-10-26: THE SoC MUST NOT START BEFORE DDR3 CALIBRATION COMPLETES.
+// ==========================================================================
+// soc_por_done releases after 65,535 cycles (~0.65 ms at 100 MHz) while DDR3
+// calibration takes several milliseconds, and cal_done -- the controller's own
+// "calibrated" output -- was declared and connected but NEVER USED.
+//
+// The consequence is exactly what the board shows: the application image in
+// SPI flash is byte-for-byte correct (verified by reading it back), the
+// bootloader runs (it is the same code that works under a JTAG configuration),
+// yet the CPU never executes anything -- because the bootloader copies the
+// application into DDR through a controller that is not ready yet, so the code
+// lands nowhere.
+//
+// The decisive cross-check: loading the SAME image with openocd, seconds after
+// configuration (i.e. with DDR long since calibrated), runs perfectly. The only
+// difference between the two paths is WHEN the first DDR write happens.
+//
+// cal_done is latched (it may be a pulse) and a 24-bit timeout (~167 ms) is
+// ORed in, so a failed calibration cannot hold the SoC in reset forever.
+// 2026-10-26 (v2): A FIXED DELAY, NOT cal_done.
+// v1 gated the SoC on cal_done; the board then failed to start at all, and the
+// polarity/semantics of that controller output cannot be confirmed from the
+// encrypted IP (it may mean "calibration in progress", not "done"). A fixed
+// delay that comfortably exceeds DDR3 calibration time is unambiguous:
+//   POR  65,535 cycles  (0.65 ms)   -- unchanged, covers PLL lock
+//   EXT 21'h1F_FFFF     (20.97 ms @100 MHz) -- covers DDR3 calibration
+// Both must elapse before the SoC leaves reset, so the bootloader's very first
+// DDR write always lands in a live controller.
+// ddr_cal_ok is still latched for observability but is deliberately NOT in the
+// reset term.
+reg        ddr_cal_ok;
+reg [23:0] por_ext;
+// 2026-10-26 (v3): 20 ms was still not enough. Symptom that forced this: the
+// board runs the OLD application even though flash holds the new one, i.e. the
+// bootloader's copy into DDR 0x1000 silently failed and the CPU executed
+// whatever DDR still held. DDR3 calibration on this part can take tens of ms
+// depending on temperature; 24 bits = 16.7 M cycles = 167 ms at 100 MHz, a
+// deliberate over-estimate. It is paid once per power-up.
+wire       por_ext_full = (por_ext == 24'hFFFFFF);
+
+always @(posedge user_clk or negedge sys_rst) begin
+    if (!sys_rst) begin
+        ddr_cal_ok <= 1'b0;
+        por_ext    <= 24'd0;
+    end else begin
+        if (cal_done)       ddr_cal_ok <= 1'b1;   // latched for observability only
+        if (!por_ext_full)  por_ext    <= por_ext + 24'd1;
+    end
+end
+
+wire soc_async_rst = ~(soc_por_done & pll_locked & user_pll_locked & por_ext_full);
+
+// ==== DIAGNOSTIC LED (added 2026-10-12) =====================================
+// Clock/reset health onto the four unused board LEDs (LED4..LED7).
+// Read it as:  LED7=pll_locked  LED6=user_pll_locked  LED5=sys_rst  LED4=ddr_rstn
+// All four must be steadily ON (1) in a healthy design. A blinking or dark LED
+// means that clock/reset is unstable -> nothing downstream can ever run.
+assign dbg_led = { pll_locked, user_pll_locked, sys_rst, ddr_rstn };
+
+//***************************************************************************
+ddr3_top                 u_ddr3_top
+      (
+      
+    .axi_clk                (user_clk             ),
+    .core_clk               (core_clk            ),
+    .sdram_clk              (sdram_clk           ),  
+    .rx_cal_clk             (rx_cal_clk          ),
+    .tx_cal_clk             (tx_cal_clk          ),
+    .tx_cal_clk_90edge      (tx_cal_clk_90edge   ),
+    .rstn                   (ddr_rstn            ),      
+    .pll_shift              (pll_shift           ),
+    .pll_shift_sel          (pll_shift_sel       ),
+    .pll_shift_ena          (pll_shift_ena       ), 
+///////////////DDR BUS
+    .ddr_ck_hi              (ddr_ck_hi           ),
+    .ddr_ck_lo              (ddr_ck_lo           ),
+    .ddr_cke                (ddr_cke             ),    
+    .ddr_reset_n            (ddr_reset_n         ),
+    .ddr_cs_n               (ddr_cs_n            ),
+    .ddr_ras_n              (ddr_ras_n           ),
+    .ddr_cas_n              (ddr_cas_n           ),
+    .ddr_we_n               (ddr_we_n            ),     
+    .ddr_addr               (ddr_addr            ),
+    .ddr_ba                 (ddr_ba              ),
+
+    .ddr_dqs_oe             (ddr_dqs_oe          ),
+    .ddr_dqs_oe_n           (ddr_dqs_oe_n        ),
+    .ddr_dq_oe              (ddr_dq_oe           ),
+    .ddr_dqs_in_hi          (ddr_dqs_in_hi       ),
+    .ddr_dqs_in_lo          (ddr_dqs_in_lo       ),
+    .ddr_dq_in_hi           (ddr_dq_in_hi        ),
+    .ddr_dq_in_lo           (ddr_dq_in_lo        ),
+
+    .ddr_dqs_out_hi         (ddr_dqs_out_hi      ),
+    .ddr_dqs_out_lo         (ddr_dqs_out_lo      ),
+    .ddr_dq_out_hi          (ddr_dq_out_hi       ),
+    .ddr_dq_out_lo          (ddr_dq_out_lo       ),
+    
+    .ddr_dm_hi              (ddr_dm_hi           ),
+    .ddr_dm_lo              (ddr_dm_lo           ),
+    .ddr_odt                (ddr_odt             ),
+
+// Application interface ports
+       .app_sr_req                     (1'b0),
+       .app_ref_req                    (1'b0),
+       .app_zq_req                     (1'b0),
+       .app_sr_active                  (app_sr_active),
+       .app_ref_ack                    (app_ref_ack),
+       .app_zq_ack                     (app_zq_ack),
+
+// Slave Interface Write Address Ports
+       .s_axi_awid                     (s_axi_awid        ),
+       .s_axi_awaddr                   (s_axi_awaddr      ),
+       .s_axi_awlen                    (s_axi_awlen       ),
+       .s_axi_awsize                   (s_axi_awsize      ),
+       .s_axi_awburst                  (s_axi_awburst     ),
+       .s_axi_awlock                   (s_axi_awlock      ),
+       .s_axi_awcache                  (s_axi_awcache     ),
+       .s_axi_awprot                   (s_axi_awprot      ),
+       .s_axi_awqos                    (4'h0              ),
+       .s_axi_awvalid                  (s_axi_awvalid     ),
+       .s_axi_awready                  (s_axi_awready     ),
+// Slave Interface Write Data Ports
+       .s_axi_wdata                    (s_axi_wdata       ),
+       .s_axi_wstrb                    (s_axi_wstrb       ),
+       .s_axi_wlast                    (s_axi_wlast       ),
+       .s_axi_wvalid                   (s_axi_wvalid      ),
+       .s_axi_wready                   (s_axi_wready      ),
+// Slave Interface Write Response Ports
+       .s_axi_bid                      (s_axi_bid         ),
+       .s_axi_bresp                    (s_axi_bresp       ),
+       .s_axi_bvalid                   (s_axi_bvalid      ),
+       .s_axi_bready                   (s_axi_bready      ),
+// Slave Interface Read Address Ports
+       .s_axi_arid                     (s_axi_arid        ),
+       .s_axi_araddr                   (s_axi_araddr      ),
+       .s_axi_arlen                    (s_axi_arlen       ),
+       .s_axi_arsize                   (s_axi_arsize      ),
+       .s_axi_arburst                  (s_axi_arburst     ),
+       .s_axi_arlock                   (s_axi_arlock      ),
+       .s_axi_arcache                  (s_axi_arcache     ),
+       .s_axi_arprot                   (s_axi_arprot      ),
+       .s_axi_arqos                    (4'h0              ),
+       .s_axi_arvalid                  (s_axi_arvalid     ),
+       .s_axi_arready                  (s_axi_arready     ),
+// Slave Interface Read Data Ports
+       .s_axi_rid                      (s_axi_rid         ),
+       .s_axi_rdata                    (s_axi_rdata       ),
+       .s_axi_rresp                    (s_axi_rresp       ),
+       .s_axi_rlast                    (s_axi_rlast       ),
+       .s_axi_rvalid                   (s_axi_rvalid      ),
+       .s_axi_rready                   (s_axi_rready      ),
+//DEBUG       
+       .wrlvl_dq_check                 (wrlvl_dq_check    ) ,
+       .rd_level_dqs_check             (rd_level_dqs_check) ,
+       .rdlvl_shift                    (rdlvl_shift) ,
+       .wrlvl_shift                    (wrlvl_shift) ,
+       .init_cur_state                 (init_cur_state    ) ,
+       .idelay_ld                      (idelay_ld         ) ,
+       .mpr_rdlvl_dly                  (mpr_rdlvl_dly     ) ,
+       .ddr_debug_port                 (ddr_debug_port    ) ,
+       .cal_done                       (cal_done          ) 
+       );
+// End of User Design top instance
+
+//***************************************************************************
+
+
+//***************************************************************************
+soc u_sapphire_soc(
+    .io_asyncReset                      (soc_async_rst                      ),
+    .io_systemClk                       (user_clk                           ),
+
+    //UART 0
+    .system_uart_0_io_txd               (system_uart_0_io_txd               ),
+    .system_uart_0_io_rxd               (system_uart_0_io_rxd               ),
+    .io_memoryClk                       (user_clk                           ),
+    .io_memoryReset                     (                                   ),
+    .io_systemReset                     (                                   ),
+    //External Memory AXI4 Interface
+    .io_ddrA_aw_payload_prot            (                                  ),//(                                  ),
+    .io_ddrA_aw_payload_qos             (                                  ),//(                                  ),
+    .io_ddrA_aw_payload_cache           (                                  ),//(                                  ),
+    .io_ddrA_aw_payload_lock            (soc_ddrA_awlock                     ),//(m1_axi_awlock                     ),
+    .io_ddrA_aw_payload_burst           (soc_ddrA_awburst                    ),//(m1_axi_awburst                    ),
+    .io_ddrA_aw_payload_size            (soc_ddrA_awsize                     ),//(m1_axi_awsize                     ),
+    .io_ddrA_aw_payload_len             (soc_ddrA_awlen                      ),//(m1_axi_awlen                      ),
+    .io_ddrA_aw_payload_region          (                                 ),//(                                  ),
+    .io_ddrA_aw_payload_id              (soc_ddrA_awid                       ),//(m1_axi_awid                       ),
+    .io_ddrA_aw_payload_addr            (soc_ddrA_awaddr                     ),//(m1_axi_awaddr                     ),
+    .io_ddrA_aw_ready                   (soc_ddrA_awready                    ),//(m1_axi_awready                    ),
+    .io_ddrA_aw_valid                   (soc_ddrA_awvalid                    ),//(m1_axi_awvalid                    ),
+    .io_ddrA_w_payload_last             (soc_ddrA_wlast                      ),//(m1_axi_wlast                      ),
+    .io_ddrA_w_ready                    (soc_ddrA_wready                     ),//(m1_axi_wready                     ),
+    .io_ddrA_w_valid                    (soc_ddrA_wvalid                     ),  //(m1_axi_wvalid                     ),    
+    .io_ddrA_w_payload_strb             (soc_ddrA_wstrb                      ),//(m1_axi_wstrb                      ),
+    .io_ddrA_w_payload_data             (soc_ddrA_wdata                      ),//(m1_axi_wdata                      ),
+    .io_ddrA_b_payload_resp             (                                 ),//(                                  ),
+    .io_ddrA_b_payload_id               (soc_ddrA_bid                        ),//(m1_axi_bid                        ),
+    .io_ddrA_b_ready                    (soc_ddrA_bready                     ),//(m1_axi_bready                     ),
+    .io_ddrA_b_valid                    (soc_ddrA_bvalid                     ),//(m1_axi_bvalid                     ),
+    .io_ddrA_ar_payload_prot            (                                 ),//(                                  ),
+    .io_ddrA_ar_payload_qos             (                                 ),//(                                  ),
+    .io_ddrA_ar_payload_cache           (                                 ),//(                                  ),
+    .io_ddrA_ar_payload_region          (                                 ),//(                                  ),
+    .io_ddrA_ar_payload_lock            (soc_ddrA_arlock                     ),//(m1_axi_arlock                     ),
+    .io_ddrA_ar_payload_burst           (soc_ddrA_arburst                    ),//(m1_axi_arburst                    ),
+    .io_ddrA_ar_payload_size            (soc_ddrA_arsize                     ),//(m1_axi_arsize                     ),
+    .io_ddrA_ar_payload_len             (soc_ddrA_arlen                      ),//(m1_axi_arlen                      ),
+    .io_ddrA_ar_payload_id              (soc_ddrA_arid                       ),//(m1_axi_arid                       ),
+    .io_ddrA_ar_payload_addr            (soc_ddrA_araddr                     ),//(m1_axi_araddr                     ),
+    .io_ddrA_ar_ready                   (soc_ddrA_arready                    ),//(m1_axi_arready                    ),
+    .io_ddrA_ar_valid                   (soc_ddrA_arvalid                    ),//(m1_axi_arvalid                    ),
+    .io_ddrA_r_payload_last             (soc_ddrA_rlast                      ),//(m1_axi_rlast                      ),
+    .io_ddrA_r_payload_resp             (soc_ddrA_rresp                      ),//(m1_axi_rresp                      ),
+    .io_ddrA_r_payload_id               (soc_ddrA_rid                        ),//(m1_axi_rid                        ),
+    .io_ddrA_r_payload_data             (soc_ddrA_rdata                      ),//(m1_axi_rdata                      ),
+    .io_ddrA_r_ready                    (soc_ddrA_rready                     ),//(m1_axi_rready                     ),
+    .io_ddrA_r_valid                    (soc_ddrA_rvalid                     ),//(m1_axi_rvalid                     ),
+
+    // ============ AXI slave port: BitBlt register file ============
+    // 16 MB window at 0xE1000000 (matches "Base_M_AXIS" in the SoC settings).
+    // 32-bit data, which is exactly what bitblt_axi_slave implements, so no
+    // width adaptation is needed between them.
+    .axiA_awid                          (reg_awid                           ),
+    .axiA_awaddr                        (reg_awaddr                         ),
+    .axiA_awlen                         (reg_awlen                          ),
+    .axiA_awsize                        (reg_awsize                         ),
+    .axiA_awburst                       (reg_awburst                        ),
+    .axiA_awlock                        (reg_awlock                         ),
+    .axiA_awcache                       (reg_awcache                        ),
+    .axiA_awprot                        (reg_awprot                         ),
+    .axiA_awqos                         (reg_awqos                          ),
+    .axiA_awregion                      (reg_awregion                       ),
+    .axiA_awvalid                       (reg_awvalid                        ),
+    .axiA_awready                       (reg_awready                        ),
+    .axiA_wdata                         (reg_wdata                          ),
+    .axiA_wstrb                         (reg_wstrb                          ),
+    .axiA_wlast                         (reg_wlast                          ),
+    .axiA_wvalid                        (reg_wvalid                         ),
+    .axiA_wready                        (reg_wready                         ),
+    .axiA_bid                           (reg_bid                            ),
+    .axiA_bresp                         (reg_bresp                          ),
+    .axiA_bvalid                        (reg_bvalid                         ),
+    .axiA_bready                        (reg_bready                         ),
+    .axiA_arid                          (reg_arid                           ),
+    .axiA_araddr                        (reg_araddr                         ),
+    .axiA_arlen                         (reg_arlen                          ),
+    .axiA_arsize                        (reg_arsize                         ),
+    .axiA_arburst                       (reg_arburst                        ),
+    .axiA_arlock                        (reg_arlock                         ),
+    .axiA_arcache                       (reg_arcache                        ),
+    .axiA_arprot                        (reg_arprot                         ),
+    .axiA_arqos                         (reg_arqos                          ),
+    .axiA_arregion                      (reg_arregion                       ),
+    .axiA_arvalid                       (reg_arvalid                        ),
+    .axiA_arready                       (reg_arready                        ),
+    .axiA_rid                           (reg_rid                            ),
+    .axiA_rdata                         (reg_rdata                          ),
+    .axiA_rresp                         (reg_rresp                          ),
+    .axiA_rlast                         (reg_rlast                          ),
+    .axiA_rvalid                        (reg_rvalid                         ),
+    .axiA_rready                        (reg_rready                         ),
+    .axiAInterrupt                      (blt_interrupt                      ),
+     //SPI 0
+    .system_spi_0_io_sclk_write         (system_spi_0_io_sclk_write         ),
+    .system_spi_0_io_data_0_writeEnable (system_spi_0_io_data_0_OE ),
+    .system_spi_0_io_data_0_read        (system_spi_0_io_data_0_IN        ),
+    .system_spi_0_io_data_0_write       (system_spi_0_io_data_0_OUT       ),
+    .system_spi_0_io_data_1_writeEnable (system_spi_0_io_data_1_OE ),
+    .system_spi_0_io_data_1_read        (system_spi_0_io_data_1_IN        ),
+    .system_spi_0_io_data_1_write       (system_spi_0_io_data_1_OUT       ),
+    .system_spi_0_io_data_2_writeEnable (                                   ),
+    .system_spi_0_io_data_2_read        (                                   ),
+    .system_spi_0_io_data_2_write       (                                   ),
+    .system_spi_0_io_data_3_writeEnable (                                   ),
+    .system_spi_0_io_data_3_read        (                                   ),
+    .system_spi_0_io_data_3_write       (                                   ),
+    .system_spi_0_io_ss                 (system_spi_0_io_ss                 ),
+    //APB 0
+    .io_apbSlave_0_PADDR                (apb_paddr                          ),
+    .io_apbSlave_0_PSEL                 (apb_psel                           ),
+    .io_apbSlave_0_PENABLE              (apb_penable                        ),
+    .io_apbSlave_0_PREADY               (apb_pready                         ),
+    .io_apbSlave_0_PWRITE               (apb_pwrite                         ),
+    .io_apbSlave_0_PWDATA               (apb_pwdata                         ),
+    .io_apbSlave_0_PRDATA               (apb_prdata                         ),
+    .io_apbSlave_0_PSLVERROR            (apb_pslverror                      ),
+
+    .system_gpio_0_io_write             ( soc_gpio_OUT                      ),//,
+    // DEBUG 2026-10-13: bit0 = R handshake seen, bit1 = AR handshake seen,
+    // bit2 = RVALID now, bit3 = read active. Read from software at 0xF8015000.
+    // (soc_gpio_IN is unused by this design.)
+    // DEBUG 2026-10-13: now carrying the Axi_Mux AR arbitration state instead
+    // of bitblt_top's dbg_observ.
+    // DEBUG 2026-10-13: the DECISIVE pair. rd1_arvalid is the channel-side
+    // ARVALID; s_axi_arvalid is what the mux actually forwards to the DDR
+    // controller. If s_axi_arvalid is LOW the mux is not even presenting the
+    // request (internal deadlock); if it is HIGH while arready stays low, the
+    // DDR controller is refusing it.
+    //   bit2 = s_axi_arvalid   bit3 = s_axi_arready
+    // Measured 0x6 (arvalid=1, arready=0 repeatedly): the mux DOES forward the
+    // AR; the DDR controller refuses it. Most likely the controller is in-order
+    // and still owes R data for an earlier read that the mux will not accept.
+    //   bit0 = s_axi_rvalid   bit1 = s_axi_rready
+    // Measured 0x5: rvalid=1 and rready=0 -- the DDR controller HAS data to
+    // hand over and the mux will not take it, so the in-order controller
+    // refuses the next AR. Now identify WHO the R bus is routed to and whether
+    // that channel is actually asking for data.
+    //   bit0 = rd0_rready   bit1 = rd1_rready
+    //   bit2..3 = r_cnl_num[1:0]
+    // 2026-10-17: was {r_cnl_num[1:0], rd1_rready, rd0_rready}, which read 0x0 in
+    // both states. Now the 4-group observation mux defined above.
+    .system_gpio_0_io_read              ( obs_val                           ),//
+    .system_gpio_0_io_writeEnable       ( soc_gpio_OE                       ),//, 
+
+
+    //Hard Jtag Tap
+    .jtagCtrl_tck                       (jtag_inst1_TCK                     ),
+    .jtagCtrl_tdi                       (jtag_inst1_TDI                     ),
+    .jtagCtrl_tdo                       (jtag_inst1_TDO                     ),
+    .jtagCtrl_enable                    (jtag_inst1_SEL                     ),
+    .jtagCtrl_capture                   (jtag_inst1_CAPTURE                 ),
+    .jtagCtrl_shift                     (jtag_inst1_SHIFT                   ),
+    .jtagCtrl_update                    (jtag_inst1_UPDATE                  ),
+    .jtagCtrl_reset                     (jtag_inst1_RESET                   )
+
+);
+
+
+/* DIAGNOSTIC 2026-10-12: disabled to test whether this APB slave is
+   interfering with the SoC's built-in UART/SPI at 0xF801xxxx.
+   Symptom under test: APB reads work but ALL APB writes are dropped.
+apb3_top u_apb3_top(
+    .clk                                (user_clk                           ),
+    .reset                              (!ddr_rstn                          ),
+    .apb_paddr                          (apb_paddr                          ),
+    .apb_psel                           (apb_psel                           ),
+    .apb_penable                        (apb_penable                        ),
+    .apb_pready                         (apb_pready                         ),
+    .apb_pwrite                         (apb_pwrite                         ),
+    .apb_pwdata                         (apb_pwdata                         ),
+    .apb_prdata                         (apb_prdata                         ),
+    .apb_pslverror                      (apb_pslverror                      ),
+    .sig                                (sig                                )
+    
+);*/    
+
+//***************************************************************************
+
+
+//***************************************************************************
+
+// ==========================================================================
+// Axi_Mux -- merges four AXI masters onto the DDR3 controller
+// ==========================================================================
+// Slave port 0 : SoC DDR master       (full AXI4)
+// Slave port 1 : bitblt read source   (AR/R only -- AW/W/B tied off)
+// Slave port 2 : bitblt read dest     (AR/R only -- AW/W/B tied off)
+// Slave port 3 : bitblt write engine  (AW/W/B only -- AR/R tied off)
+//
+// The engines only implement the half of AXI4 they need, but Axi_Mux expects a
+// complete port on every slave, so the unused halves are tied to constants.
+// Each *_W_ID must equal the corresponding AW_ID: Axi_Mux uses the ID to tell
+// in-flight transactions from different channels apart.
+//
+// LOCK is 2 bits inside Axi_Mux but 1 bit on the SoC and the DDR3 controller,
+// so it is zero-extended on the way in and truncated on the way out. Both are
+// written out explicitly -- see the note near the wire declarations.
+// ==========================================================================
+Axi_Mux u_axi_mux (
+    .Sys_Clk                            (user_clk                           ),
+    .Sys_Rst_N                          (ddr_rstn                           ),
+
+    // ---------------- slave port 0: SoC DDR master ----------------
+    .I_S0_AW_ID                         (soc_ddrA_awid                      ),
+    .I_S0_AW_ADDR                       (soc_ddrA_awaddr                    ),
+    .I_S0_AW_LEN                        (soc_ddrA_awlen                     ),
+    .I_S0_AW_SIZE                       (soc_ddrA_awsize                    ),
+    .I_S0_AW_BURST                      (soc_ddrA_awburst                   ),
+    .I_S0_AW_LOCK                       ({1'b0, soc_ddrA_awlock}            ),
+    .I_S0_AW_VALID                      (soc_ddrA_awvalid                   ),
+    .O_S0_AW_READY                      (soc_ddrA_awready                   ),
+    .I_S0_W_ID                          (soc_ddrA_awid                      ),
+    .I_S0_W_DATA                        (soc_ddrA_wdata                     ),
+    .I_S0_W_LAST                        (soc_ddrA_wlast                     ),
+    .I_S0_W_STRB                        (soc_ddrA_wstrb                     ),
+    .I_S0_W_VALID                       (soc_ddrA_wvalid                    ),
+    .O_S0_W_READY                       (soc_ddrA_wready                    ),
+    .O_S0_B_ID                          (soc_ddrA_bid                       ),
+    .O_S0_B_VALID                       (soc_ddrA_bvalid                    ),
+    .I_S0_B_READY                       (soc_ddrA_bready                    ),
+    .I_S0_AR_ID                         (soc_ddrA_arid                      ),
+    .I_S0_AR_ADDR                       (soc_ddrA_araddr                    ),
+    .I_S0_AR_LEN                        (soc_ddrA_arlen                     ),
+    .I_S0_AR_SIZE                       (soc_ddrA_arsize                    ),
+    .I_S0_AR_BURST                      (soc_ddrA_arburst                   ),
+    .I_S0_AR_LOCK                       ({1'b0, soc_ddrA_arlock}            ),
+    .I_S0_AR_VALID                      (soc_ddrA_arvalid                   ),
+    .O_S0_AR_READY                      (soc_ddrA_arready                   ),
+    .O_S0_R_ID                          (soc_ddrA_rid                       ),
+    .O_S0_R_DATA                        (soc_ddrA_rdata                     ),
+    .O_S0_R_LAST                        (soc_ddrA_rlast                     ),
+    .O_S0_R_RESP                        (soc_ddrA_rresp                     ),
+    .O_S0_R_VALID                       (soc_ddrA_rvalid                    ),
+    // 2026-10-17: the SoC's ready ORed with the R-channel watchdog -- see the
+    // block comment at the sys_rst assignment. A wedged SoC channel must not be
+    // able to stop the in-order DDR controller serving the blit engines.
+    .I_S0_R_READY                       (soc_ddrA_rready_eff                ),
+
+    // ---------------- slave port 1: bitblt read source ----------------
+    // The read engine has no write channel, so AW/W/B are idle: VALID held low
+    // and READY ignored.
+    .I_S1_AW_ID                         (8'h00                              ),
+    .I_S1_AW_ADDR                       (32'h0                              ),
+    .I_S1_AW_LEN                        (8'h00                              ),
+    .I_S1_AW_SIZE                       (3'h0                               ),
+    .I_S1_AW_BURST                      (2'b01                              ),
+    .I_S1_AW_LOCK                       (2'b00                              ),
+    .I_S1_AW_VALID                      (1'b0                               ),
+    .O_S1_AW_READY                      (                                   ),
+    .I_S1_W_ID                          (8'h00                              ),
+    .I_S1_W_DATA                        (128'h0                             ),
+    .I_S1_W_LAST                        (1'b0                               ),
+    .I_S1_W_STRB                        (16'h0                              ),
+    .I_S1_W_VALID                       (1'b0                               ),
+    .O_S1_W_READY                       (                                   ),
+    .O_S1_B_ID                          (                                   ),
+    .O_S1_B_VALID                       (                                   ),
+    .I_S1_B_READY                       (1'b0                               ),
+    .I_S1_AR_ID                         (bl1_arid                           ),
+    .I_S1_AR_ADDR                       (bl1_araddr                         ),
+    .I_S1_AR_LEN                        (bl1_arlen                          ),
+    .I_S1_AR_SIZE                       (bl1_arsize                         ),
+    .I_S1_AR_BURST                      (bl1_arburst                        ),
+    .I_S1_AR_LOCK                       (2'b00                              ),
+    .I_S1_AR_VALID                      (bl1_arvalid                        ),
+    .O_S1_AR_READY                      (bl1_arready                        ),
+    .O_S1_R_ID                          (bl1_rid                            ),
+    .O_S1_R_DATA                        (bl1_rdata                          ),
+    .O_S1_R_LAST                        (bl1_rlast                          ),
+    .O_S1_R_RESP                        (bl1_rresp                          ),
+    .O_S1_R_VALID                       (bl1_rvalid                         ),
+    .I_S1_R_READY                       (bl1_rready                         ),
+
+    // ---------------- slave port 2: bitblt read destination ----------------
+    .I_S2_AW_ID                         (8'h00                              ),
+    .I_S2_AW_ADDR                       (32'h0                              ),
+    .I_S2_AW_LEN                        (8'h00                              ),
+    .I_S2_AW_SIZE                       (3'h0                               ),
+    .I_S2_AW_BURST                      (2'b01                              ),
+    .I_S2_AW_LOCK                       (2'b00                              ),
+    .I_S2_AW_VALID                      (1'b0                               ),
+    .O_S2_AW_READY                      (                                   ),
+    .I_S2_W_ID                          (8'h00                              ),
+    .I_S2_W_DATA                        (128'h0                             ),
+    .I_S2_W_LAST                        (1'b0                               ),
+    .I_S2_W_STRB                        (16'h0                              ),
+    .I_S2_W_VALID                       (1'b0                               ),
+    .O_S2_W_READY                       (                                   ),
+    .O_S2_B_ID                          (                                   ),
+    .O_S2_B_VALID                       (                                   ),
+    .I_S2_B_READY                       (1'b0                               ),
+    .I_S2_AR_ID                         (bl2_arid                           ),
+    .I_S2_AR_ADDR                       (bl2_araddr                         ),
+    .I_S2_AR_LEN                        (bl2_arlen                          ),
+    .I_S2_AR_SIZE                       (bl2_arsize                         ),
+    .I_S2_AR_BURST                      (bl2_arburst                        ),
+    .I_S2_AR_LOCK                       (2'b00                              ),
+    .I_S2_AR_VALID                      (bl2_arvalid                        ),
+    .O_S2_AR_READY                      (bl2_arready                        ),
+    .O_S2_R_ID                          (bl2_rid                            ),
+    .O_S2_R_DATA                        (bl2_rdata                          ),
+    .O_S2_R_LAST                        (bl2_rlast                          ),
+    .O_S2_R_RESP                        (bl2_rresp                          ),
+    .O_S2_R_VALID                       (bl2_rvalid                         ),
+    .I_S2_R_READY                       (bl2_rready                         ),
+
+    // ---------------- slave port 3: bitblt write engine ----------------
+    // The write engine has no read channel, so AR/R are idle.
+    .I_S3_AW_ID                         (bl3_awid                           ),
+    .I_S3_AW_ADDR                       (bl3_awaddr                         ),
+    .I_S3_AW_LEN                        (bl3_awlen                          ),
+    .I_S3_AW_SIZE                       (bl3_awsize                         ),
+    .I_S3_AW_BURST                      (bl3_awburst                        ),
+    .I_S3_AW_LOCK                       (2'b00                              ),
+    .I_S3_AW_VALID                      (bl3_awvalid                        ),
+    .O_S3_AW_READY                      (bl3_awready                        ),
+    .I_S3_W_ID                          (bl3_awid                           ),
+    .I_S3_W_DATA                        (bl3_wdata                          ),
+    .I_S3_W_LAST                        (bl3_wlast                          ),
+    .I_S3_W_STRB                        (bl3_wstrb                          ),
+    .I_S3_W_VALID                       (bl3_wvalid                         ),
+    .O_S3_W_READY                       (bl3_wready                         ),
+    .O_S3_B_ID                          (bl3_bid                            ),
+    .O_S3_B_VALID                       (bl3_bvalid                         ),
+    .I_S3_B_READY                       (bl3_bready                         ),
+    .I_S3_AR_ID                         (8'h00                              ),
+    .I_S3_AR_ADDR                       (32'h0                              ),
+    .I_S3_AR_LEN                        (8'h00                              ),
+    .I_S3_AR_SIZE                       (3'h0                               ),
+    .I_S3_AR_BURST                      (2'b01                              ),
+    .I_S3_AR_LOCK                       (2'b00                              ),
+    .I_S3_AR_VALID                      (1'b0                               ),
+    .O_S3_AR_READY                      (                                   ),
+    .O_S3_R_ID                          (                                   ),
+    .O_S3_R_DATA                        (                                   ),
+    .O_S3_R_LAST                        (                                   ),
+    .O_S3_R_RESP                        (                                   ),
+    .O_S3_R_VALID                       (                                   ),
+    .I_S3_R_READY                       (1'b0                               ),
+
+    // ---------------- slave port 4: video scan-out ----------------
+    // Reads the framebuffer independently of the BitBlt engines. It needs no
+    // write channel, so AW/W/B are tied off the same way as S1/S2.
+    // NOTE: Cfg_Cnl_Mask below must have its bit 4 set, or this port is masked
+    // out and the whole datapath gets optimised away without any error.
+    .I_S4_AW_ID                         (8'h00                              ),
+    .I_S4_AW_ADDR                       (32'h0                              ),
+    .I_S4_AW_LEN                        (8'h00                              ),
+    .I_S4_AW_SIZE                       (3'h0                               ),
+    .I_S4_AW_BURST                      (2'b01                              ),
+    .I_S4_AW_LOCK                       (2'b00                              ),
+    .I_S4_AW_VALID                      (1'b0                               ),
+    .O_S4_AW_READY                      (                                   ),
+    .I_S4_W_ID                          (8'h00                              ),
+    .I_S4_W_DATA                        (128'h0                             ),
+    .I_S4_W_LAST                        (1'b0                               ),
+    .I_S4_W_STRB                        (16'h0                              ),
+    .I_S4_W_VALID                       (1'b0                               ),
+    .O_S4_W_READY                       (                                   ),
+    .O_S4_B_ID                          (                                   ),
+    .O_S4_B_VALID                       (                                   ),
+    .I_S4_B_READY                       (1'b0                               ),
+    .I_S4_AR_ID                         (vid_arid                           ),
+    .I_S4_AR_ADDR                       (vid_araddr                         ),
+    .I_S4_AR_LEN                        (vid_arlen                          ),
+    .I_S4_AR_SIZE                       (vid_arsize                         ),
+    .I_S4_AR_BURST                      (vid_arburst                        ),
+    .I_S4_AR_LOCK                       (2'b00                              ),
+    .I_S4_AR_VALID                      (vid_arvalid                        ),
+    .O_S4_AR_READY                      (vid_arready                        ),
+    .O_S4_R_ID                          (vid_rid                            ),
+    .O_S4_R_DATA                        (vid_rdata                          ),
+    .O_S4_R_LAST                        (vid_rlast                          ),
+    .O_S4_R_RESP                        (vid_rresp                          ),
+    .O_S4_R_VALID                       (vid_rvalid                         ),
+    .I_S4_R_READY                       (vid_rready                         ),
+
+    // ---------------- master side: to ddr3_top ----------------
+    .O_M_AW_ID                          (s_axi_awid                         ),
+    .O_M_AW_ADDR                        (s_axi_awaddr                       ),
+    .O_M_AW_LEN                         (s_axi_awlen                        ),
+    .O_M_AW_SIZE                        (s_axi_awsize                       ),
+    .O_M_AW_BURST                       (s_axi_awburst                      ),
+    .O_M_AW_LOCK                        (m_awlock_2b                        ),
+    .O_M_AW_VALID                       (s_axi_awvalid                      ),
+    .I_M_AW_READY                       (s_axi_awready                      ),
+    .O_M_W_ID                           (                                   ),
+    .O_M_W_DATA                         (s_axi_wdata                        ),
+    .O_M_W_LAST                         (s_axi_wlast                        ),
+    .O_M_W_STRB                         (s_axi_wstrb                        ),
+    .O_M_W_VALID                        (s_axi_wvalid                       ),
+    .I_M_W_READY                        (s_axi_wready                       ),
+    .I_M_B_ID                           (s_axi_bid                          ),
+    .I_M_B_VALID                        (s_axi_bvalid                       ),
+    .O_M_B_READY                        (s_axi_bready                       ),
+    .O_M_AR_ID                          (s_axi_arid                         ),
+    .O_M_AR_ADDR                        (s_axi_araddr                       ),
+    .O_M_AR_LEN                         (s_axi_arlen                        ),
+    .O_M_AR_SIZE                        (s_axi_arsize                       ),
+    .O_M_AR_BURST                       (s_axi_arburst                      ),
+    .O_M_AR_LOCK                        (m_arlock_2b                        ),
+    .O_M_AR_VALID                       (s_axi_arvalid                      ),
+    .I_M_AR_READY                       (s_axi_arready                      ),
+    .I_M_R_ID                           (s_axi_rid                          ),
+    .I_M_R_DATA                         (s_axi_rdata                        ),
+    .I_M_R_LAST                         (s_axi_rlast                        ),
+    .I_M_R_RESP                         (s_axi_rresp                        ),
+    .I_M_R_VALID                        (s_axi_rvalid                       ),
+    .O_M_R_READY                        (s_axi_rready                       ),
+
+    // ------------------------- configuration -------------------------
+    // BOTH of these were left unconnected in the first integration attempt and
+    // the consequence was severe rather than cosmetic: with Cfg_Cnl_Mask
+    // undriven the synthesiser concluded that slave ports 1..3 could never
+    // affect the master side, deleted the entire upstream datapath (both read
+    // engines, the pixel engine and the write engine), and STILL reported a
+    // clean "map : PASS". Only the resource numbers exposed it -- the whole
+    // accelerator had collapsed from 1405 FFs to 437.
+    // Axi_Mux now has FIVE slave ports (X5): the mask must cover all of them.
+    // Leaving it at 4'b1111 silently masks port 4 and the video datapath gets
+    // optimised away with no error -- the same failure mode as the earlier
+    // Cfg_Cnl_Mask incident documented in docs/14.
+    // FIX 2026-10-13: was 1'b1 (priority, S0 highest). Under priority arbitration
+    // Axi_Mux resets Channel_List to channel-0-only on every grant
+    // (Axi_Mux.v L2546-2550), so a master that polls continuously -- the CPU in
+    // blt_wait() -- starves the bitblt DMA channels S1/S2/S3 forever. The engine
+    // then never completes and BUSY stays 1, which looks like a dead bus.
+    // Round-robin (0) rotates Channel_List so every channel gets served.
+    .Cfg_Arb_Type                       (1'b0                               ),  // 0 = round-robin arbitration
+    .Cfg_Cnl_Mask                       (5'b11111                           ),  // all FIVE channels enabled
+
+    // DEBUG 2026-10-13: AR-channel arbitration state out to the SoC GPIO.
+    // Hypothesis under test: Axi_Mux is stuck in S_ADDR_ACT holding a channel
+    // that no longer requests, so ARREADY is never returned to rd_dst (which
+    // observes arvalid=1 / arready=0 forever).
+    .O_AR_Cnl_Num                       (ar_cnl_num                         ),
+    // DEBUG: which channel the R bus is currently routed to. Paired with the
+    // per-reader rready signals this shows whether the mux is waiting on a
+    // channel that is not asking for data.
+    .O_R_Cnl_Num                        (r_cnl_num                          ),
+    .O_Dbg_Arb_AR                       (ar_dbg_arb                         )
+);
+// AR bus "currently active channel" number (3 bits: 0..4). This is the value
+// Axi_Mux_Addr_Ctrl latched when it granted the AR bus; if it stops changing
+// while a channel still asserts ARVALID, the arbiter is stuck holding it.
+
+// ==========================================================================
+// BitBlt accelerator
+// ==========================================================================
+// Register file on the SoC's axiA port (16 MB @ 0xE1000000); the three AXI4
+// masters go to Axi_Mux ports 1..3.
+// ==========================================================================
+bitblt_top #(
+    .AXI_DW      (128),
+    .AXI_AW      (32),
+    .DW          (32),
+    .PX_PER_BEAT (4)
+) u_bitblt (
+    .clk            (user_clk),
+    .rst_n          (ddr_rstn),
+
+    // ---------------- AXI4 slave: register file ----------------
+    .axi_interrupt  (blt_interrupt),
+    .s_axi_awid     (reg_awid                           ),
+    .s_axi_awaddr   (reg_awaddr                         ),
+    .s_axi_awlen    (reg_awlen                          ),
+    .s_axi_awsize   (reg_awsize                         ),
+    .s_axi_awburst  (reg_awburst                        ),
+    .s_axi_awlock   (reg_awlock                         ),
+    .s_axi_awcache  (reg_awcache                        ),
+    .s_axi_awprot   (reg_awprot                         ),
+    .s_axi_awqos    (reg_awqos                          ),
+    .s_axi_awregion (reg_awregion                       ),
+    .s_axi_awvalid  (reg_awvalid                        ),
+    .s_axi_awready  (reg_awready                        ),
+    .s_axi_wdata    (reg_wdata                          ),
+    .s_axi_wstrb    (reg_wstrb                          ),
+    .s_axi_wlast    (reg_wlast                          ),
+    .s_axi_wvalid   (reg_wvalid                         ),
+    .s_axi_wready   (reg_wready                         ),
+    .s_axi_bid      (reg_bid                            ),
+    .s_axi_bresp    (reg_bresp                          ),
+    .s_axi_bvalid   (reg_bvalid                         ),
+    .s_axi_bready   (reg_bready                         ),
+    .s_axi_arid     (reg_arid                           ),
+    .s_axi_araddr   (reg_araddr                         ),
+    .s_axi_arlen    (reg_arlen                          ),
+    .s_axi_arsize   (reg_arsize                         ),
+    .s_axi_arburst  (reg_arburst                        ),
+    .s_axi_arlock   (reg_arlock                         ),
+    .s_axi_arcache  (reg_arcache                        ),
+    .s_axi_arprot   (reg_arprot                         ),
+    .s_axi_arqos    (reg_arqos                          ),
+    .s_axi_arregion (reg_arregion                       ),
+    .s_axi_arvalid  (reg_arvalid                        ),
+    .s_axi_arready  (reg_arready                        ),
+    .s_axi_rid      (reg_rid                            ),
+    .s_axi_rdata    (reg_rdata                          ),
+    .s_axi_rresp    (reg_rresp                          ),
+    .s_axi_rlast    (reg_rlast                          ),
+    .s_axi_rvalid   (reg_rvalid                         ),
+    .s_axi_rready   (reg_rready                         ),
+
+    // DEBUG 2026-10-13: register-file read-channel state (see bitblt_axi_slave).
+    // Routed to the SoC GPIO input so software can see it without performing a
+    // read on the (currently hanging) AXI slave port.
+    .dbg_observ     (dbg_observ                         ),
+    .dbg_rd_state   (dbg_rd_state                       ),
+
+    // ---------------- AXI4 master 0: read source ----------------
+    .rd0_arid       (bl1_arid                           ),
+    .rd0_araddr     (bl1_araddr                         ),
+    .rd0_arlen      (bl1_arlen                          ),
+    .rd0_arsize     (bl1_arsize                         ),
+    .rd0_arburst    (bl1_arburst                        ),
+    .rd0_arlock     (                                   ),
+    .rd0_arcache    (                                   ),
+    .rd0_arprot     (                                   ),
+    .rd0_arvalid    (bl1_arvalid                        ),
+    .rd0_arready    (bl1_arready                        ),
+    .rd0_rid        (bl1_rid                            ),
+    .rd0_rdata      (bl1_rdata                          ),
+    .rd0_rresp      (bl1_rresp                          ),
+    .rd0_rlast      (bl1_rlast                          ),
+    .rd0_rvalid     (bl1_rvalid                         ),
+    .rd0_rready     (bl1_rready                         ),
+
+    // ---------------- AXI4 master 1: read destination row ----------------
+    .rd1_arid       (bl2_arid                           ),
+    .rd1_araddr     (bl2_araddr                         ),
+    .rd1_arlen      (bl2_arlen                          ),
+    .rd1_arsize     (bl2_arsize                         ),
+    .rd1_arburst    (bl2_arburst                        ),
+    .rd1_arlock     (                                   ),
+    .rd1_arcache    (                                   ),
+    .rd1_arprot     (                                   ),
+    .rd1_arvalid    (bl2_arvalid                        ),
+    .rd1_arready    (bl2_arready                        ),
+    .rd1_rid        (bl2_rid                            ),
+    .rd1_rdata      (bl2_rdata                          ),
+    .rd1_rresp      (bl2_rresp                          ),
+    .rd1_rlast      (bl2_rlast                          ),
+    .rd1_rvalid     (bl2_rvalid                         ),
+    .rd1_rready     (bl2_rready                         ),
+
+    // ---------------- AXI4 master 2: write back ----------------
+    .wr_awid        (bl3_awid                           ),
+    .wr_awaddr      (bl3_awaddr                         ),
+    .wr_awlen       (bl3_awlen                          ),
+    .wr_awsize      (bl3_awsize                         ),
+    .wr_awburst     (bl3_awburst                        ),
+    .wr_awlock      (                                   ),
+    .wr_awcache     (                                   ),
+    .wr_awprot      (                                   ),
+    .wr_awvalid     (bl3_awvalid                        ),
+    .wr_awready     (bl3_awready                        ),
+    .wr_wdata       (bl3_wdata                          ),
+    .wr_wstrb       (bl3_wstrb                          ),
+    .wr_wlast       (bl3_wlast                          ),
+    .wr_wvalid      (bl3_wvalid                         ),
+    .wr_wready      (bl3_wready                         ),
+    .wr_bid         (bl3_bid                            ),
+    .wr_bresp       (bl3_bresp                          ),
+    .wr_bvalid      (bl3_bvalid                         ),
+    .wr_bready      (bl3_bready                         ),
+
+    // ---------------- status ----------------
+    .busy           (                                   ),
+    .cur_line       (                                   ),
+    .dbg_beats_rd   (                                   ),
+    .dbg_beats_wr   (                                   ),
+    .dbg_b_error    (                                   ),
+
+    // ---------------- scan-out configuration ----------------
+    // Straight from the register file to the video module below. These used to
+    // be constants wired into u_video_out, which made double buffering
+    // impossible: the scan-out was pinned to one address while the engine drew
+    // into whichever buffer it was told to.
+    .reg_fb_base    (vid_fb_base                        ),
+    .reg_fb_width   (vid_fb_width                       ),
+    .reg_fb_height  (vid_fb_height                      ),
+    .reg_fb_stride  (vid_fb_stride                      ),
+    .reg_fb_enable  (vid_fb_enable                      ),
+    // Read-only status: is scan-out currently in blanking? Software polls this
+    // before writing FB_CFG.
+    .scan_blanking  (scan_blanking                      ),
+    // Scan-out starvation: one synchronised bit plus a stable-sampled count.
+    .scan_short     (scan_short                         ),
+    .scan_short_count(short_stable                      ),
+    .scan_lines     (lines_stable                       ),
+    .scan_frames    (frames_stable                      ),
+    // 2026-10-27: observability (FrameSpeed-style underruns/shown/axi_errors)
+    .scan_underruns (und_stable                         ),
+    .scan_shown     (shown_stable                       ),
+    .scan_axi_err(vid_axi_errors                     )
+);
+
+// ==========================================================================
+// Video output -- colour-bar bring-up mode
+// ==========================================================================
+// This revision drives TEST_MODE=2'b10 (built-in colour bar) so the HDMI path
+// can be proven without depending on the frame-buffer read path. Swapping in
+// bitblt_video_out (pixel-clock domain FIFO + line buffer) is the next step and
+// touches only this block.
+//
+// 640x480@60 CEA-861 timing, taken from lcd_para.v -- the only reference in the
+// demo set that uses standard parameters.
+// ==========================================================================
+// ==========================================================================
+// Video scan-out -- reads the framebuffer over AXI4 (Axi_Mux slave port 4)
+// ==========================================================================
+// This replaces the colour-bar generator that was here for bring-up. The whole
+// point of this revision is that the pixels now come from DDR3, so whatever the
+// BitBlt engines write into the framebuffer is what appears on screen.
+//
+// The five configuration inputs are tied to constants for now rather than being
+// driven from registers, on purpose: the open question at this stage is whether
+// the datapath can fetch and display correctly at all, not whether the address
+// is runtime-configurable. Wiring up registers first would mean debugging two
+// things at once. They move into the register file once the path is proven.
+//
+// fb_base = 0x08000000 (128 MB into a 256 MB part): well clear of the low
+// addresses where the SoC's code and data live.
+//
+// fb_stride comes from FB_CFG at runtime; the driver programmes 1920*4 = 7680.
+// ==========================================================================
+bitblt_video_out #(
+    // 2026-10-14 FIX -- H_ACT/V_ACT were overridden here with 640/480, left over
+    // from the 640x480 bring-up, while the driver programmes a 1920x1080
+    // framebuffer and pix_clk runs at 148.5 MHz. The arithmetic:
+    //     H_TOTAL = 640+88+44+148 = 920,  V_TOTAL = 525
+    //     148.5e6 / (920 * 525) = 307 Hz
+    // which no HDMI sink will display. commit 126585b fixed exactly this, and
+    // the override came back in an uncommitted edit -- hence the second note.
+    //
+    // The module DEFAULTS (1920x1080 active, 2200x1125 total @ 148.5 MHz =
+    // 59.94 Hz) ARE the product configuration. Do not re-add the override.
+    .FIFO_AW (11),
+    .AXI_ID  (8'h1E)              // low 4 bits: 8/A/C/E for us, 0-7 left to the SoC
+) u_video_out (
+    .clk           (user_clk),    // AXI domain, 100 MHz
+    .rst_n         (ddr_rstn),
+    .pclk          (pix_clk),     // pixel domain, 25 MHz
+
+    .fb_base       (vid_fb_base),
+    .fb_stride     (vid_fb_stride),
+    .fb_width      (vid_fb_width),
+    .fb_height     (vid_fb_height),
+    .enable        (vid_fb_enable),
+
+    .m_axi_arid    (vid_arid),
+    .m_axi_araddr  (vid_araddr),
+    .m_axi_arlen   (vid_arlen),
+    .m_axi_arsize  (vid_arsize),
+    .m_axi_arburst (vid_arburst),
+    .m_axi_arvalid (vid_arvalid),
+    .m_axi_arready (vid_arready),
+    .m_axi_rid     (vid_rid),
+    .m_axi_rdata   (vid_rdata),
+    .m_axi_rresp   (vid_rresp),
+    .m_axi_rlast   (vid_rlast),
+    .m_axi_rvalid  (vid_rvalid),
+    .m_axi_rready  (vid_rready),
+
+    .rgb           (vid_rgb),
+    .de            (vid_de),
+    .hs            (vid_hs),
+    .vs            (vid_vs),
+    .h_cnt_o       (),
+    .v_cnt_o       (vid_v_cnt),
+    .rd_row_o      (vid_rd_row),
+    .o_blanking    (vid_blanking),
+    .o_short_sticky(vid_short),
+    .o_short_count (vid_short_count),
+    .o_lines_last  (vid_lines_last),
+    .o_frames      (vid_frames),
+    .o_underruns   (vid_underruns),
+    .o_shown       (vid_shown),
+    .o_axi_errors  (vid_axi_errors),
+    // Raised when fb_width cannot be served by one AXI burst (not a multiple of
+    // 4 pixels, or wider than 1024 so arlen would not fit its 8-bit field).
+    // Wired rather than left open, and watched directly in simulation.
+    .cfg_error     (vid_cfg_error)
+);
+
+// Two-flop synchroniser for the blanking bit. rst_n here is the AXI-domain
+// reset (ddr_rstn), matching the clock these flops run on.
+always @(posedge user_clk or negedge ddr_rstn) begin
+    if (!ddr_rstn) begin
+        scan_blanking_meta <= 1'b1;      // start "blanking" so nothing enables early
+        scan_blanking      <= 1'b1;
+        scan_short_meta    <= 1'b0;
+        scan_short         <= 1'b0;
+        short_s0           <= 32'd0;
+        short_s1           <= 32'd0;
+        short_stable       <= 32'd0;
+        lines_s0           <= 16'd0;
+        lines_s1           <= 16'd0;
+        lines_stable       <= 16'd0;
+        frames_s0          <= 32'd0;
+        frames_s1          <= 32'd0;
+        frames_stable      <= 32'd0;
+        und_s0             <= 32'd0;
+        und_s1             <= 32'd0;
+        und_stable         <= 32'd0;
+        shown_s0           <= 32'd0;
+        shown_s1           <= 32'd0;
+        shown_stable       <= 32'd0;
+    end else begin
+        scan_blanking_meta <= vid_blanking;
+        scan_blanking      <= scan_blanking_meta;
+
+        // one bit: a plain two-flop chain
+        scan_short_meta    <= vid_short;
+        scan_short         <= scan_short_meta;
+
+        // 32 bits: stable-sample. Shift the pixel-domain value through two
+        // registers and accept it only when both hold the same thing. A count
+        // that has stopped changing is not mid-transition, so what software
+        // reads was a real value at some point -- not a mixture of two.
+        short_s0           <= vid_short_count;
+        short_s1           <= short_s0;
+        if (short_s0 == short_s1) short_stable <= short_s0;
+
+        // Same scheme for the self-proof counters.
+        lines_s0           <= vid_lines_last;
+        lines_s1           <= lines_s0;
+        if (lines_s0 == lines_s1) lines_stable <= lines_s0;
+
+        frames_s0          <= vid_frames;
+        frames_s1          <= frames_s0;
+        if (frames_s0 == frames_s1) frames_stable <= frames_s0;
+
+        // 2026-10-27: the two new pixel-domain counters, same stable-sample.
+        und_s0             <= vid_underruns;
+        und_s1             <= und_s0;
+        if (und_s0 == und_s1) und_stable <= und_s0;
+
+        shown_s0           <= vid_shown;
+        shown_s1           <= shown_s0;
+        if (shown_s0 == shown_s1) shown_stable <= shown_s0;
+    end
+end
+
+dvi_encoder u_dvi_encoder (
+    .pixelclk   (pix_clk),
+    .rstin      (~ddr_rstn),
+    .blue_din   (vid_rgb[7:0]                       ),
+    .green_din  (vid_rgb[15:8]                      ),
+    .red_din    (vid_rgb[23:16]                     ),
+    .hsync      (vid_hs                             ),
+    .vsync      (vid_vs                             ),
+    .de         (vid_de                             ),
+    .tmds_data0 (tmds_data0                         ),
+    .tmds_data1 (tmds_data1                         ),
+    .tmds_data2 (tmds_data2                         ),
+    .tmds_clk   (tmds_clk                           )
+);
+
+// Outputs are inverted: the FPGA differential P/N pins are swapped on this
+// board (see docs/04 and the official 03_hdmi_tx_demo top level).
+assign tmds_clk_o   = ~tmds_clk;
+assign tmds_data0_o = ~tmds_data0;
+assign tmds_data1_o = ~tmds_data1;
+assign tmds_data2_o = ~tmds_data2;
+
+// LVDS transmit enable / reset, tied off exactly as the official design does.
+// These ports exist so the lvds_info section of the .peri.xml has something to
+// bind oe_name / reset_name to.
+assign tmds_data0_TX_OE  = 1'b1;   assign tmds_data0_TX_RST = 1'b0;
+assign tmds_data1_TX_OE  = 1'b1;   assign tmds_data1_TX_RST = 1'b0;
+assign tmds_data2_TX_OE  = 1'b1;   assign tmds_data2_TX_RST = 1'b0;
+assign tmds_clk_TX_OE    = 1'b1;   assign tmds_clk_TX_RST   = 1'b0;
+
+endmodule

@@ -1,0 +1,486 @@
+// Testbench for bitblt_video_out.
+//
+// WHAT IS CHECKED
+//   1. AXI read address  == fb_base + row * fb_stride, one burst per line
+//   2. rd_row wraps at fb_height
+//   3. pixel order: ascending within a line, correct across line boundaries
+//   4. de/rgb phase -- rgb must carry the pixel de marks, on the same cycle
+//
+// The AXI slave returns an identifiable value per pixel:
+//     pixel(row, col) = row*1000 + col
+// so an ordering mistake shows up as a wrong colour rather than merely "some
+// data arrived".
+//
+// TESTBENCH PITFALLS DELIBERATELY AVOIDED (learned earlier in this project):
+//   * rlast and rdata are COMBINATIONAL with respect to the beat being presented.
+//     Registering rlast makes the first beat of a burst look like the last one;
+//     registering rdata makes beat 0 appear twice.
+//   * stimulus is applied #1 after the clock edge, never in the same timestep.
+`timescale 1ns / 1ps
+
+module tb_bitblt_video_out;
+
+    // ---------------- clocks ----------------
+    reg clk  = 1'b0;      // AXI domain, 100 MHz
+    reg pclk = 1'b0;      // pixel domain
+
+    // pclk period is overridable, because the interesting question is whether
+    // this scan-out can SUSTAIN full-HD. At the 640x480 rate (40 ns) the FIFO
+    // stays full and the AXI side idles most of the time, so any throughput
+    // measured there is dominated by idle cycles and says nothing.
+    //
+    // Raising pclk to ~148 MHz (the 1080p60 rate) makes the display consume
+    // faster than the splitter can refill, which is exactly the condition
+    // under test: if the FIFO runs dry the pixel checks fail. The stimulus
+    // loop counts pclk edges, so the number of checks is unaffected by this
+    // -- only correctness is.
+    //
+    //   +pclk_ns=40   default, 25 MHz, the 640x480 configuration
+    //   +pclk_ns=7    ~143 MHz, near the 1080p60 rate
+    //   +pclk_ns=6    ~167 MHz, deliberately pessimistic
+    integer pclk_ns = 40;
+    initial begin
+        // $value$plusargs returns 0 when the switch is absent; the cast form
+        // void'(...) is SystemVerilog and -g2005 rejects it.
+        if (!$value$plusargs("pclk_ns=%d", pclk_ns)) pclk_ns = 40;
+    end
+
+    always #5        clk  = ~clk;
+    always #(pclk_ns/2) pclk = ~pclk;
+
+    reg rst_n = 1'b0;
+
+    // ---------------- configuration ----------------
+    localparam H_ACT = 640, V_ACT = 480;
+    localparam FB_W  = 640;
+    localparam FB_H  = 480;
+    localparam STRIDE = 4096;                  // 4 KB-aligned pitch -- see docs/40
+    localparam BASE   = 32'h8000_0000;
+    localparam BEATS  = FB_W / 8;              // 80 beats per line (565)
+
+    reg [31:0] fb_base   = BASE;
+    reg [15:0] fb_stride = STRIDE;
+    reg [15:0] fb_width  = FB_W;
+    reg [15:0] fb_height = FB_H;
+    reg        enable    = 1'b0;
+
+    // fb_stride is overridable so ONE testbench can demonstrate BOTH sides of
+    // the 4 KB question -- a positive and a negative case from the same code:
+    //
+    //   +stride=2560   the old natural pitch  -> bursts cross 4 KB -> FAIL
+    //   +stride=4096   the 4 KB-aligned pitch -> no crossing       -> PASS
+    //
+    // Without the negative case the assertion could be vacuous: a check that
+    // never fires proves nothing. $value$plusargs is used rather than
+    // $test$plusargs because the latter does PREFIX matching, so "+stride"
+    // would also be matched by an unrelated "+stride_foo".
+    integer stride_arg = 0;
+    initial begin
+        if ($value$plusargs("stride=%d", stride_arg))
+            fb_stride = stride_arg[15:0];
+    end
+
+    // ---------------- AXI4 read slave BFM ----------------
+    wire [7:0]   arid;
+    wire [31:0]  araddr;
+    wire [7:0]   arlen;
+    wire [2:0]   arsize;
+    wire [1:0]   arburst;
+    wire         arvalid;
+    reg          arready = 1'b1;
+
+    reg  [7:0]   rid    = 8'h20;
+    wire [127:0] rdata;      // continuous: must be valid from t=0, see the assign below
+    reg  [1:0]   rresp  = 2'b00;
+    wire         rlast;
+    reg          rvalid = 1'b0;
+    wire         rready;
+
+    // ---- build one beat from (row, beat index) ----
+    // beat contains pixels col = 4*b .. 4*b+3, each 32-bit {A,R,G,B} with RGB low
+    // The arithmetic goes through an explicit reg first: Verilog rejects a
+    // concatenation operand whose width is not self-determined, which is what
+    // {8'hFF, (row*1000+col)} would be.
+    // 565 payload: the LOW 16 bits of the linear index, so ADJACENT COLUMNS
+    // differ by 1. Packing high bits instead (what the stage-2 patch did) makes
+    // every 8 columns identical, and a checker that cannot resolve one pixel
+    // cannot see a pixel-order error -- which is the entire point of this test.
+    function [15:0] pix565;
+        input [31:0] row;
+        input [31:0] col;
+        reg   [31:0] v;
+        begin
+            v      = row*1000 + col;
+            pix565 = v[15:0];
+        end
+    endfunction
+
+    // 565 -> 888 expansion, bit for bit what bitblt_video_out does.
+    function [23:0] pix888;
+        input [31:0] row;
+        input [31:0] col;
+        reg   [15:0] pp;
+        begin
+            pp     = pix565(row, col);
+            pix888 = { pp[15:11], pp[15:13], pp[10:5], pp[10:9], pp[4:0], pp[4:2] };
+        end
+    endfunction
+
+    function [127:0] beat_data;
+        input [31:0] row;
+        input [31:0] b;
+        begin
+            beat_data = { pix565(row, b*8 + 7), pix565(row, b*8 + 6),
+                          pix565(row, b*8 + 5), pix565(row, b*8 + 4),
+                          pix565(row, b*8 + 3), pix565(row, b*8 + 2),
+                          pix565(row, b*8 + 1), pix565(row, b*8 + 0) };
+        end
+    endfunction
+
+    // ---- burst engine ----
+    reg [31:0] cur_row  = 32'd0;
+    reg [31:0] beat_idx = 32'd0;
+    reg        bursting = 1'b0;
+    integer    ar_count = 0;
+
+    // capture AR and derive which row it refers to
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            bursting <= 1'b0;
+            beat_idx <= 32'd0;
+            cur_row  <= 32'd0;
+            rvalid   <= 1'b0;
+            ar_count <= 0;
+        end else begin
+            if (arvalid && arready) begin
+                cur_row  <= (araddr - fb_base) / fb_stride;
+                ar_count <= ar_count + 1;
+                beat_idx <= 32'd0;
+                bursting <= 1'b1;
+                rvalid   <= 1'b1;
+            end else if (bursting) begin
+                if (rvalid && rready) begin
+                    if (rlast) begin
+                        bursting <= 1'b0;
+                        rvalid   <= 1'b0;
+                        beat_idx <= 32'd0;
+                    end else begin
+                        beat_idx <= beat_idx + 32'd1;
+                    end
+                end
+            end
+        end
+    end
+
+    // rdata / rlast are COMBINATIONAL w.r.t. the beat being presented
+    // CONTINUOUS ASSIGNMENTS, NOT AN always BLOCK.
+    // Two earlier forms were wrong and each cost a debug round:
+    //   always @(*)                  -- iverilog does not put signals read only
+    //                                   through a FUNCTION ARGUMENT on the
+    //                                   sensitivity list, so rdata was never
+    //                                   recomputed when cur_row changed;
+    //   always @(cur_row or beat_idx) -- correct edge list, but it fires only on
+    //                                   a CHANGE, so at t=0 and on the first AR
+    //                                   (cur_row 0 -> 0) rdata stayed X.
+    // A continuous assignment is evaluated at time 0 and whenever either input
+    // moves, which is what an AXI read model has to do. Symptom it fixes: the
+    // very first beat handed to bitblt_video_out was X, and row 0's first eight
+    // pixels came out X (the last 8 of 95,994 mismatches).
+    assign rdata = beat_data(cur_row, beat_idx);
+    assign rlast = (beat_idx == BEATS - 1);
+
+    // ---------------- DUT ----------------
+    wire [23:0] rgb;
+    wire        de, hs, vs;
+    wire [15:0] h_cnt_o, v_cnt_o;
+    wire        cfg_error;
+
+    // ALL timing parameters are passed explicitly. The module's defaults are
+    // now 1920x1080@60 (the product configuration), so a testbench that
+    // overrode only H_ACT/V_ACT would silently inherit full-HD blanking:
+    //   H_TOTAL would become 640+88+44+148 = 920 instead of 800,
+    // which stretches every line by 15% and quietly reduces the number of
+    // lines this test can observe. Passing all six keeps 640x480 exact.
+    bitblt_video_out #(
+        .H_ACT  (H_ACT),     // 640
+        .H_FP   (16),
+        .H_SYNC (96),
+        .H_BP   (48),
+        .V_ACT  (V_ACT),     // 480
+        .V_FP   (10),
+        .V_SYNC (2),
+        .V_BP   (33),
+        .AXI_ID (8'h20)
+    ) dut (
+        .clk          (clk),
+        .rst_n        (rst_n),
+        .pclk         (pclk),
+        .fb_base      (fb_base),
+        .fb_stride    (fb_stride),
+        .fb_width     (fb_width),
+        .fb_height    (fb_height),
+        .enable       (enable),
+        .m_axi_arid   (arid),
+        .m_axi_araddr (araddr),
+        .m_axi_arlen  (arlen),
+        .m_axi_arsize (arsize),
+        .m_axi_arburst(arburst),
+        .m_axi_arvalid(arvalid),
+        .m_axi_arready(arready),
+        .m_axi_rid    (rid),
+        .m_axi_rdata  (rdata),
+        .m_axi_rresp  (rresp),
+        .m_axi_rlast  (rlast),
+        .m_axi_rvalid (rvalid),
+        .m_axi_rready (rready),
+        .rgb          (rgb),
+        .de           (de),
+        .hs           (hs),
+        .vs           (vs),
+        .h_cnt_o      (h_cnt_o),
+        .v_cnt_o      (v_cnt_o),
+        .cfg_error    (cfg_error)
+    );
+
+    // ---------------- checking ----------------
+    integer errors   = 0;
+    integer checks   = 0;
+    integer exp_row  = 0;
+    integer exp_col  = 0;
+    reg     de_d     = 1'b0;
+    integer lines_seen = 0;
+
+    // ---------------- cfg_error contract ----------------
+    // bitblt_video_out refuses to start unless fb_base and fb_stride are both
+    // multiples of 4096. That is not decoration: the 4 KB page splitting only
+    // keeps every burst inside one page when every row STARTS page-aligned, so
+    // a misaligned stride must be rejected rather than silently producing
+    // crossing bursts.
+    //
+    // The expectation is derived from the values this testbench actually
+    // applies, so the same test is a positive AND a negative case:
+    //     +stride=4096  -> must NOT raise cfg_error (default)
+    //     +stride=2560  -> must raise cfg_error and must not issue AR
+    // Without this, nothing would notice if the cfg_bad terms were relaxed.
+    integer cfg_err_seen  = 0;
+    integer ar_when_bad   = 0;
+    wire cfg_should_error = ((fb_stride % 32'd4096) != 32'd0) ||
+                            ((fb_base   % 32'd4096) != 32'd0);
+
+    // When the configuration is deliberately invalid there is no pixel stream
+    // to check -- the module correctly refuses to run -- so the pixel and line
+    // checks are disabled and only the cfg_error contract is judged. Without
+    // this the negative case would report FAIL and pollute the regression.
+    //   +stride=2560 +expect_cfg_error
+    reg skip_pixels = 1'b0;
+    initial begin
+        // $test$plusargs, not $value$plusargs: the latter needs a format code
+        // ("%d") and errors out without one. $test$plusargs does prefix
+        // matching, which is harmless here as no other switch shares this
+        // prefix.
+        if ($test$plusargs("expect_cfg_error")) skip_pixels = 1'b1;
+    end
+
+    always @(posedge clk) begin
+        if (rst_n) begin
+            if (cfg_error) cfg_err_seen = 1;
+            // a rejected configuration must not fetch anything
+            if (cfg_error && arvalid && arready) ar_when_bad = ar_when_bad + 1;
+        end
+    end
+
+    // ---------------- AXI4 4 KB boundary check ----------------
+    // AXI4 forbids a burst from crossing a 4 KB boundary, and the DDR3
+    // controller does NOT split one that does: its user guide documents only
+    // axi_alen / axi_asize / axi_aburst pass-through, with no promise to
+    // handle a crossing (see docs/40, and docs/21 item 1).
+    //
+    // This is the only place in the project where that property can be checked
+    // without a board, so it is asserted here rather than left to a bring-up
+    // experiment.
+    //
+    // The arithmetic, per burst:
+    //     start offset within its 4 KB page = araddr[11:0]
+    //     bytes transferred                 = (arlen + 1) * 16   (128-bit beats)
+    //     must satisfy  start + bytes <= 4096
+    //
+    // With fb_stride = 4096 and a 640-pixel row (2560 bytes) every row starts
+    // 4 KB-aligned, so no burst can reach the next boundary. With the old
+    // stride of 2560 this check fails on rows 2, 3, 6, 7, ...
+    integer ar_seen     = 0;
+    integer ar_crossing = 0;
+    integer ar_aligned  = 0;
+    integer burst_bytes;
+
+    // ---------------- supply-rate measurement ----------------
+    // How many clk cycles does one beat actually cost? The splitter holds
+    // rready low while it writes a beat into the FIFO four pixels at a time,
+    // so the cost is NOT one cycle per beat. That number decides the maximum
+    // pixel rate this scan-out can sustain, and therefore the maximum
+    // resolution -- measuring it beats reading the code and guessing.
+    //
+    //   beats/clk * 4 pixels/beat * clk_freq = pixels/s sustainable
+    //   1080p60 needs 148.5 M pixels/s; 720p60 needs 74.25 M.
+    integer clk_cycles = 0;
+    integer beats_got  = 0;
+
+    // How many lines the stimulus window could possibly show. The loop runs
+    // 120000 pclk edges and a line takes H_TOTAL of them, so this is the
+    // ceiling the assertion below compares against.
+    //
+    // H_TOTAL is a localparam INSIDE the DUT, so it cannot be referenced from
+    // here -- it is recomputed from the values this testbench passes in:
+    //   640 active + 16 fp + 96 sync + 48 bp = 800
+    localparam H_TOTAL_TB = 800;
+    integer exp_lines = 0;
+    initial exp_lines = (120000 / H_TOTAL_TB) - 2;
+
+    always @(posedge clk) begin
+        clk_cycles = clk_cycles + 1;
+        if (rvalid && rready) beats_got = beats_got + 1;
+    end
+
+    always @(posedge clk) begin
+        if (rst_n && arvalid && arready) begin
+            burst_bytes = (arlen + 1) * 16;
+            ar_seen = ar_seen + 1;
+            if (araddr[11:0] == 0)
+                ar_aligned = ar_aligned + 1;
+            if ((araddr[11:0] + burst_bytes) > 4096) begin
+                ar_crossing = ar_crossing + 1;
+                if (ar_crossing <= 5)
+                    $display("  4KB CROSS t=%0t addr=%h off=%0d len=%0d bytes=%0d end=%0d",
+                             $time, araddr, araddr[11:0], arlen, burst_bytes,
+                             araddr[11:0] + burst_bytes);
+            end
+        end
+    end
+
+    always @(posedge pclk) begin
+        if (rst_n) begin
+            de_d <= de;
+
+            if (de && !skip_pixels) begin
+                checks = checks + 1;
+                if (rgb !== pix888(exp_row, exp_col)) begin
+                    if (errors < 10)
+                        $display("  MISMATCH t=%0t row=%0d col=%0d got=%0d exp=%0d",
+                                 $time, exp_row, exp_col, rgb, pix888(exp_row, exp_col));
+                    errors = errors + 1;
+                end
+
+                if (exp_col == FB_W - 1) begin
+                    exp_col = 0;
+                    exp_row = exp_row + 1;
+                    lines_seen = lines_seen + 1;
+                end else begin
+                    exp_col = exp_col + 1;
+                end
+            end
+        end
+    end
+
+    // ---------------- stimulus ----------------
+    integer i;
+    initial begin
+        $dumpfile("tb_bitblt_video_out.vcd");
+        $dumpvars(0, tb_bitblt_video_out);
+
+        repeat (10) @(posedge clk);
+        @(negedge clk); rst_n = 1'b1;
+        repeat (10) @(posedge clk);
+
+        @(negedge clk); enable = 1'b1;
+
+        // let it run long enough for a few complete lines
+        repeat (120000) @(posedge pclk);
+
+        $display("");
+        $display("==================================================");
+        $display("  checks       = %0d", checks);
+        $display("  errors       = %0d", errors);
+        $display("  lines seen   = %0d", lines_seen);
+        $display("  AR bursts    = %0d", ar_count);
+        $display("  first AR addr= 0x%08h  (expect 0x%08h)", BASE, BASE);
+        $display("  ---- AXI4 4KB boundary ----");
+        $display("  AR seen      = %0d", ar_seen);
+        $display("  AR 4K-aligned= %0d   (araddr[11:0] == 0)", ar_aligned);
+        $display("  AR crossing  = %0d   (MUST be 0)", ar_crossing);
+        $display("  ---- supply rate ----");
+        $display("  clk cycles   = %0d", clk_cycles);
+        $display("  beats taken  = %0d", beats_got);
+        if (beats_got > 0) begin
+            // clk per beat, x100 so it prints without floating point
+            $display("  clk/beat x100= %0d", (clk_cycles * 100) / beats_got);
+            // pixels/s = beats/s * 4 = (100e6 / (clk/beat)) * 4, in millions
+            $display("  sustainable  = %0d M pixels/s at 100 MHz clk",
+                     (beats_got * 800) / clk_cycles);
+            $display("  (1080p60 needs 148, 720p60 needs 74)");
+        end
+        $display("  ---- line count (the real supply test) ----");
+        $display("  lines seen   = %0d", lines_seen);
+        $display("  lines expect = %0d  (%0d pclk / %0d per line)",
+                 exp_lines, 120000, H_TOTAL_TB);
+
+        // WHY THIS CHECK EXISTS
+        //   de is gated by ~fifo_empty, so a starved FIFO makes de low and the
+        //   whole line silently disappears. Pixel checks alone cannot see that:
+        //   checks-per-line stays correct even at 60% of the expected lines.
+        //   Measured at pclk=142.9 MHz: 89 lines instead of 149, with errors=0.
+        //   Without this assertion that run reports PASS.
+        if (!skip_pixels && (lines_seen < (exp_lines * 95) / 100)) begin
+            $display("  *** SUPPLY SHORTFALL: only %0d of %0d lines were driven",
+                     lines_seen, exp_lines);
+            errors = errors + 1;
+        end
+        $display("  ---- cfg_error contract ----");
+        $display("  stride        = %0d  base = %08h", fb_stride, fb_base);
+        $display("  expected      = %0d  (misaligned -> must be 1)", cfg_should_error);
+        $display("  cfg_error seen= %0d", cfg_err_seen);
+        $display("  AR while bad  = %0d  (MUST be 0)", ar_when_bad);
+        if (cfg_should_error) begin
+            if (!cfg_err_seen) begin
+                $display("  *** cfg_error did NOT assert for a misaligned config");
+                errors = errors + 1;
+            end
+            if (ar_when_bad != 0) begin
+                $display("  *** AR was issued %0d times despite cfg_error", ar_when_bad);
+                errors = errors + 1;
+            end
+        end else if (cfg_err_seen) begin
+            $display("  *** cfg_error asserted for a VALID config");
+            errors = errors + 1;
+        end
+        $display("==================================================");
+
+        // ar_crossing is part of the verdict, not just a printed statistic:
+        // a burst that crosses 4 KB violates AXI4 and the controller is not
+        // documented to survive it.
+        //
+        // The negative case needs its own verdict. With a deliberately invalid
+        // configuration there is no pixel stream and no AR, so the normal
+        // criteria (checks, ar_seen, ar_count) are all zero by design; judging
+        // it by those would always fail. What must hold there is the contract:
+        // cfg_error asserts and nothing is fetched.
+        if (skip_pixels) begin
+            if (cfg_should_error && cfg_err_seen && (ar_when_bad == 0) && (errors == 0))
+                $display("RESULT: PASS (cfg_error contract)");
+            else
+                $display("RESULT: FAIL");
+        end
+        else if (errors == 0 && ar_crossing == 0 && ar_seen > 0 && checks > 1000 && ar_count > 0)
+            $display("RESULT: PASS");
+        else
+            $display("RESULT: FAIL");
+
+        $finish;
+    end
+
+    // timeout guard
+    initial begin
+        #5_000_000;
+        $display("RESULT: FAIL (timeout)");
+        $finish;
+    end
+
+endmodule

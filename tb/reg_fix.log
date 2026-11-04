@@ -1,0 +1,79 @@
+VCD info: dumpfile tb_bitblt_axi_slave.vcd opened for output.
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+FAIL OP @00000008: got 00000000 want 00000002
+FAIL SRC_ADDR @0000000c: got 00000000 want 00001000
+FAIL DST_ADDR @00000010: got 00000000 want 00008000
+FAIL WIDTH_H @00000014: got 00000000 want 00140280
+FAIL SRC_STRIDE @00000018: got 00000000 want 00000a00
+FAIL DST_STRIDE @0000001c: got 00000000 want 00000a00
+FAIL FILL_COLOR @00000020: got 00000000 want ff00ff00
+FAIL ALPHA @00000024: got 000000ff want 00000080
+PASS KEY_COLOR @00000028 = 00ff00ff
+FAIL FRAME_CNT @0000002c: got 00000000 want 00000123
+FAIL BPP @00000030: got 00000004 want 00000008
+FAIL bpp port: engine sees 4 (want 8)
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+PASS STATUS-readonly @00000004 = 00000005
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+FAIL start-pulse: observed 0 pulses, want 1
+FAIL starve: RVALID never asserted while AW pending
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+FAIL back-to-back read: first read = 08000000 want 00000004 (BPP)
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+FAIL irq: not asserted
+PASS irq: deasserted
+
+SPLIT-TEST: AW handshake TIMED OUT -- awready never asserted
+SPLIT-TEST: W handshake TIMED OUT -- wready never asserted
+PASS SPR_RT_BITS @0000004c = a5a55a5a
+FAIL rt_sel port: 0000, want 3
+PASS SPR_RT_BITS-changed @0000004c = 00000001
+PASS SPR_POS_XY @00000058 = 01230456
+PASS SPR_POS_VALID @00000054 = 00000001
+PASS SPR_POS_XY-changed @00000058 = 0abc0def
+PASS SPR_POS_VALID-cleared @00000054 = 00000000
+PASS MON_STICKY @00000060 = 000000f0
+PASS MON_STICKY-changed @00000060 = 00007ff0
+PASS MON_CNT @00000068 = 00001234
+PASS MON_CNT-changed @00000068 = ffff0000
+PASS SHORT_CNT-zero @00000070 = 00000000
+PASS SHORT_CNT-saturated @00000070 = 000000ff
+PASS OOB_ADDR @00000074 = 08000f00
+PASS OOB_ADDR-changed @00000074 = 00001000
+PASS SCAN_STATUS bit0 follows blanking
+PASS SCAN_STATUS bit0 clears
+RESULT: FAILED with 15 error(s)
+tb/tb_bitblt_axi_slave.v:498: $finish called at 35415000 (1ps)

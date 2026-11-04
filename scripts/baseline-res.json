@@ -1,0 +1,78 @@
+{
+    "_comment":  [
+                     "Resource baseline for the false-PASS guard in audit-bitblt.ps1.",
+                     "",
+                     "WHY THIS FILE EXISTS (2026-10-06 audit finding):",
+                     "  The first version of the guard only checked that module NAMES appear in",
+                     "  the netlist. That cannot catch the failure this project has actually hit",
+                     "  twice: the module is still there, but its logic has collapsed. In the",
+                     "  recorded incident u_bitblt appeared 15192 times in the netlist while",
+                     "  holding only 1 FF and 1 LUT.",
+                     "",
+                     "  So compare RESOURCE COUNTS, not names. Values come from",
+                     "  sys\\outflow\\bitblt_system.res.csv (columns: FFs, SRLs, ADDs, LUTs,",
+                     "  COMB4s, RAMs, DSP/MULTs).",
+                     "",
+                     "HOW TO READ THE NUMBERS:",
+                     "  They are a snapshot of a design that is believed correct, used as a",
+                     "  LOWER BOUND (with tolerance), never as an exact target. Legitimate edits",
+                     "  move these numbers around by a few percent; a collapse moves them by",
+                     "  orders of magnitude. The tolerance is deliberately loose so ordinary",
+                     "  changes do not trip it.",
+                     "",
+                     "  This cannot detect a design that was already wrong when the baseline was",
+                     "  taken. It detects REGRESSION, which is the failure mode actually seen.",
+                     "",
+                     "REFRESHING: after an intentional change, re-run the map flow and update",
+                     "  the numbers here -- but only after confirming the new resource counts are",
+                     "  plausible. Refreshing blindly defeats the purpose."
+                 ],
+    "generated":  "2026-10-06",
+    "source":  "sys/outflow/bitblt_system.res.csv (after dma_wr/bpp/cfg_error fixes)",
+    "tolerance":  0.70,
+    "modules":  {
+                    "u_bitblt:bitblt_top":  {
+                                                "ff":  1413,
+                                                "lut":  1553,
+                                                "dsp":  25,
+                                                "note":  "three DMA engines plus the line scheduler"
+                                            },
+                    "u_regs:bitblt_axi_slave":  {
+                                                    "ff":  507,
+                                                    "lut":  455,
+                                                    "dsp":  0,
+                                                    "note":  "16 registers x 32 bits plus the AXI state machine"
+                                                },
+                    "u_addr:bitblt_addr_gen":  {
+                                                   "ff":  77,
+                                                   "lut":  147,
+                                                   "dsp":  1,
+                                                   "note":  "line counter and address accumulation"
+                                               },
+                    "u_video_out:bitblt_video_out":  {
+                                                         "ff":  294,
+                                                         "lut":  277,
+                                                         "dsp":  1,
+                                                         "note":  "video timing, AXI read FSM, 128-to-24 splitter"
+                                                     },
+                    "u_axi_mux:Axi_Mux":  {
+                                              "ff":  63,
+                                              "lut":  559,
+                                              "dsp":  0,
+                                              "note":  "vendor interconnect, 5 channels"
+                                          },
+                    "u_dvi_encoder:dvi_encoder":  {
+                                                      "ff":  135,
+                                                      "lut":  219,
+                                                      "dsp":  0,
+                                                      "note":  "TMDS encoding for three channels"
+                                                  }
+                },
+    "pulse_gen_note":  [
+                           "bitblt_pulse_gen legitimately synthesises to about 1 FF / 1 LUT -- it is a",
+                           "single edge detector. That is also the exact signature of collapsed logic,",
+                           "which is why it is deliberately NOT in the module list above: including it",
+                           "would produce permanent false alarms. Its presence is instead covered by",
+                           "the netlist-name check."
+                       ]
+}

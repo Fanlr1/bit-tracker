@@ -1,0 +1,382 @@
+// BitBlt video scan-out: reads the framebuffer over AXI4 and drives RGB + syncs.
+//
+// ============================================================================
+// ARCHITECTURE
+// ============================================================================
+//
+//   pixel domain (pclk, 25 MHz)              AXI domain (clk, 100 MHz)
+//   ---------------------------              ------------------------
+//     h_cnt / v_cnt  (free running)
+//          |
+//          | de_raw
+//          v
+//     [FWFT FIFO 24b x 2048]  <-----------  128->24 split  <---- AXI4 read
+//          |                                       ^                ^
+//          | o_rdata valid BEFORE i_re             |                |
+//          v                                       |          [line FSM]
+//     rgb / de / hs / vs                            |                |
+//                                                   |        o_wcnt (level)
+//                                                   |                |
+//                                          px_in_line / rd_row counters
+//
+// ============================================================================
+// THREE DESIGN DECISIONS WORTH STATING
+// ============================================================================
+//
+// (1) FWFT FIFO INSTEAD OF A COMPENSATED READ
+//     The previous revision used OUTPUT_REG="TRUE", so o_rdata became valid one
+//     cycle AFTER i_re, and it tried to compensate with fifo_re = de | de_d. That
+//     fudge never aligned, because the consumer (color_bar_rgb) also registers
+//     its output -- the result was a fixed pixel offset.
+//     Here OUTPUT_REG="FALSE" (first-word fall-through): o_rdata is already
+//     valid when de is asserted, and rgb is a direct wire. No delay to tune.
+//
+//     Note on COMPATIBILITY: "X" and "A" FORCE OUTPUT_REG to "FALSE" internally
+//     (dual_clock_fifo.v lines 86 and 161). "E" passes the user value through
+//     (line 123). So "E" + "FALSE" is the combination that actually does what it
+//     says; picking "X" for safety would silently ignore the parameter.
+//
+// (2) LINE NUMBER DERIVED FROM PIXELS WRITTEN -- NO CLOCK-DOMAIN HANDSHAKE
+//     The pixel side knows which line it displays; the AXI side must know which
+//     line to fetch. Passing v_cnt across would need a synchroniser or a small
+//     async FIFO.
+//     Instead the AXI side counts the pixels it has written and advances rd_row
+//     when a line's worth has gone by. The two sides cannot drift because the
+//     count IS the shared state. Division is avoided by carrying px_in_line and
+//     incrementing rd_row on wrap.
+//
+// (3) PREFETCH THRESHOLD TAKEN FROM THE FIFO ITSELF
+//     need_line compares the FIFO's own o_wcnt against one line of pixels.
+//     A separate credit counter is easy to get subtly out of step with real
+//     occupancy; reading o_wcnt cannot be.
+//
+// ============================================================================
+// THROUGHPUT (why holding rready low during the split is harmless)
+// ============================================================================
+//   A line costs ~fb_width clk cycles of AXI time (4 clk per beat, 4 px/beat).
+//   A line of display lasts H_TOTAL pixels x 4 clk/pixel = 4*H_TOTAL clk.
+//   With fb_width=640, H_TOTAL=800: 640 cycles of work per 3200 available,
+//   about 20% utilisation. The back-pressure costs nothing.
+//
+// ============================================================================
+// TIMING (CEA-861 640x480@60)
+// ============================================================================
+//   H: fp 16, sync 96, active 640, bp 48  -> 800
+//   V: fp 10, sync  2, active 480, bp 33  -> 525
+`timescale 1ns / 1ps
+
+module bitblt_video_out #(
+    parameter H_ACT   = 640,
+    parameter H_FP    = 16,
+    parameter H_SYNC  = 96,
+    parameter H_BP    = 48,
+    parameter V_ACT   = 480,
+    parameter V_FP    = 10,
+    parameter V_SYNC  = 2,
+    parameter V_BP    = 33,
+    parameter FIFO_AW = 11,           // 2048 pixels, about 3.2 lines of 640
+    parameter AXI_ID  = 8'h20         // distinct from the three BitBlt engines
+) (
+    input  wire         clk,          // AXI domain
+    input  wire         rst_n,
+    input  wire         pclk,         // pixel domain
+
+    // ---------------- configuration (AXI domain) ----------------
+    input  wire [31:0]  fb_base,
+    input  wire [15:0]  fb_stride,    // bytes per line
+    input  wire [15:0]  fb_width,     // pixels per line
+    input  wire [15:0]  fb_height,    // lines per frame
+    input  wire         enable,
+
+    // ---------------- AXI4 read master ----------------
+    output wire [7:0]   m_axi_arid,
+    output wire [31:0]  m_axi_araddr,
+    output wire [7:0]   m_axi_arlen,
+    output wire [2:0]   m_axi_arsize,
+    output wire [1:0]   m_axi_arburst,
+    output wire         m_axi_arvalid,
+    input  wire         m_axi_arready,
+    input  wire [7:0]   m_axi_rid,
+    input  wire [127:0] m_axi_rdata,
+    input  wire [1:0]   m_axi_rresp,
+    input  wire         m_axi_rlast,
+    input  wire         m_axi_rvalid,
+    output wire         m_axi_rready,
+
+    // ---------------- video out ----------------
+    output wire [23:0]  rgb,
+    output wire         de,
+    output wire         hs,
+    output wire         vs,
+    output wire [15:0]  h_cnt_o,
+    output wire [15:0]  v_cnt_o,
+    output wire         cfg_error
+);
+
+    localparam H_TOTAL = H_ACT + H_FP + H_SYNC + H_BP;   // 800
+    localparam V_TOTAL = V_ACT + V_FP + V_SYNC + V_BP;   // 525
+
+    // ========================================================================
+    // 1. Video timing, pixel domain
+    // ========================================================================
+    //
+    // Reset synchroniser for the pixel clock domain.
+    //
+    // rst_n is asynchronous to pclk, and until now it drove pclk-domain
+    // registers directly (h_cnt/v_cnt and the FIFO read side). Asynchronous
+    // assertion is fine, but asynchronous RELEASE is not: if rst_n goes high
+    // close to a pclk edge, some flip-flops leave reset on one edge and others
+    // on the next, so the counters can start from inconsistent values. That
+    // shows up as an occasional garbled picture after a cold power-up that
+    // disappears after a warm reset -- the hardest kind of fault to reproduce.
+    //
+    // Two flops shift in a constant 1, so the release is aligned to pclk.
+    // Assertion stays asynchronous, which is what we want.
+    reg [1:0] rst_sync_p;
+    always @(posedge pclk or negedge rst_n) begin
+        if (!rst_n) rst_sync_p <= 2'b00;
+        else        rst_sync_p <= {rst_sync_p[0], 1'b1};
+    end
+    wire rst_n_pclk = rst_sync_p[1];
+
+    reg [12:0] h_cnt, v_cnt;
+
+    always @(posedge pclk or negedge rst_n_pclk) begin
+        if (!rst_n_pclk) begin
+            h_cnt <= 13'd0;
+            v_cnt <= 13'd0;
+        end else if (h_cnt == H_TOTAL - 1) begin
+            h_cnt <= 13'd0;
+            if (v_cnt == V_TOTAL - 1) v_cnt <= 13'd0;
+            else                      v_cnt <= v_cnt + 13'd1;
+        end else begin
+            h_cnt <= h_cnt + 13'd1;
+        end
+    end
+
+    wire h_active = (h_cnt < H_ACT);
+    wire v_active = (v_cnt < V_ACT);
+    wire de_raw   = h_active & v_active;
+
+    // Syncs are active low (CEA-861) and are deliberately independent of data
+    // availability, so a FIFO underrun can never damage the sync timing itself.
+    assign hs = ~((h_cnt >= H_ACT + H_FP) && (h_cnt < H_ACT + H_FP + H_SYNC));
+    assign vs = ~((v_cnt >= V_ACT + V_FP) && (v_cnt < V_ACT + V_FP + V_SYNC));
+
+    assign h_cnt_o = {3'b000, h_cnt};
+    assign v_cnt_o = {3'b000, v_cnt};
+
+    // ========================================================================
+    // 2. Splitter state (declared first -- fifo_we and px_sel depend on it)
+    // ========================================================================
+    reg [127:0] hold;
+    reg [1:0]   split_cnt;
+    reg         splitting;
+
+    // pixel n occupies bits [n*32 +: 32] = {A,R,G,B}; RGB is the low 24 bits
+    wire [23:0] px_sel = (split_cnt == 2'd0) ? hold[23:0]   :
+                         (split_cnt == 2'd1) ? hold[55:32]  :
+                         (split_cnt == 2'd2) ? hold[87:64]  :
+                                               hold[119:96];
+
+    // ========================================================================
+    // 3. FWFT FIFO -- o_rdata valid BEFORE i_re
+    // ========================================================================
+    wire [23:0]        fifo_rdata;
+    wire               fifo_empty, fifo_full;
+    wire [FIFO_AW-1:0] fifo_wcnt;
+
+    wire fifo_we = splitting & ~fifo_full;
+    wire fifo_re = de_raw & ~fifo_empty;
+
+    // o_rdata appears ONE read clock after i_re -- measured, not assumed. The
+    // dedicated latency testbench (tb_fifo_latency.v) wrote three known words and
+    // showed the first one on o_rdata exactly one rclk after re went high, even
+    // with OUTPUT_REG="FALSE". So de is delayed by the same single clock to stay
+    // aligned with rgb.
+    //
+    // Alignment check across a line end:
+    //   cycle   de_raw  empty  fifo_re  rdata  de_d1   output
+    //     T0       1      0       1       x      0      -
+    //     T1       1      0       1      P0      1      de=1 rgb=P0
+    //     T2       1      0       1      P1      1      de=1 rgb=P1
+    //     T3       1      1       0      P2      1      de=1 rgb=P2   <- last pixel, kept
+    //     T4       1      1       0      P2      0      -
+    // The fact that empty rises while the last word is still on rdata works in
+    // our favour here: it stops fifo_re from popping one extra word.
+    reg de_d1;
+
+    always @(posedge pclk or negedge rst_n_pclk) begin
+        if (!rst_n_pclk) de_d1 <= 1'b0;
+        else             de_d1 <= fifo_re;
+    end
+
+    assign de  = de_d1;
+    assign rgb = fifo_rdata;
+
+    dual_clock_fifo_wrapper #(
+        .DATA_WIDTH    (24),
+        .ADDR_WIDTH    (FIFO_AW),
+        .LATENCY       (1),
+        .FIFO_MODE     ("STD_FIFO"),
+        .COMPATIBILITY ("E"),
+        .OUTPUT_REG    ("FALSE"),        // first-word fall-through
+        .CHECK_FULL    ("TRUE"),
+        .CHECK_EMPTY   ("TRUE")
+    ) u_fifo (
+        .i_arst   (~rst_n),
+        .i_wclk   (clk),
+        .i_we     (fifo_we),
+        .i_wdata  (px_sel),
+        .i_rclk   (pclk),
+        .i_re     (fifo_re),
+        .o_full   (fifo_full),
+        .o_empty  (fifo_empty),
+        .o_rdata  (fifo_rdata),
+        .o_afull  (),
+        .o_aempty (),
+        .o_wcnt   (fifo_wcnt),
+        .o_rcnt   (),
+        .o_dbg_w_re        (),
+        .o_dbg_w_waddrb_1P (), .o_dbg_w_waddrg_1P (),
+        .o_dbg_r_waddrb_1P (), .o_dbg_r_waddrg_1P (), .o_dbg_r_waddrg_2P (),
+        .o_dbg_r_wflag_1P  (),
+        .o_dbg_w_raddrb_1P (), .o_dbg_w_raddrg_1P (),
+        .o_dbg_r_raddrb_1P (), .o_dbg_r_raddrg_1P (), .o_dbg_r_raddrg_2P (),
+        .o_dbg_r_rflag_1P  (), .o_dbg_r_rflag_2P  ()
+    );
+
+    // ========================================================================
+    // 4. Write side bookkeeping
+    // ========================================================================
+    // Hold rready low while splitting. The header arithmetic shows this costs
+    // ~20% of the available AXI time for this scan-out and removes the need for
+    // a beat buffer.
+    assign m_axi_rready = ~splitting;
+
+    wire beat_accept = m_axi_rvalid & m_axi_rready;
+
+    reg [15:0] px_in_line;      // pixels written into the current line
+    reg [15:0] rd_row;          // line currently being / next to be fetched
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            splitting  <= 1'b0;
+            split_cnt  <= 2'd0;
+            hold       <= 128'd0;
+            px_in_line <= 16'd0;
+            rd_row     <= 16'd0;
+        end else begin
+            if (!splitting) begin
+                if (beat_accept) begin
+                    hold      <= m_axi_rdata;
+                    splitting <= 1'b1;
+                    split_cnt <= 2'd0;
+                end
+            end else if (fifo_we) begin
+                if (split_cnt == 2'd3) splitting <= 1'b0;
+                else                   split_cnt <= split_cnt + 2'd1;
+
+                // advance the line counter as pixels leave the splitter, so
+                // rd_row tracks what the display side actually consumes
+                if (px_in_line == fb_width - 16'd1) begin
+                    px_in_line <= 16'd0;
+                    rd_row     <= (rd_row == fb_height - 16'd1) ? 16'd0
+                                                                : rd_row + 16'd1;
+                end else begin
+                    px_in_line <= px_in_line + 16'd1;
+                end
+            end
+        end
+    end
+
+    // ========================================================================
+    // 4. Prefetch decision, taken straight from the FIFO's own level
+    // ========================================================================
+    // fifo_wcnt is narrower than fb_width; widen before comparing rather than
+    // letting Verilog truncate silently.
+    wire [15:0] wcnt16    = {{(16-FIFO_AW){1'b0}}, fifo_wcnt};
+    wire        need_line = enable & (wcnt16 < fb_width);
+
+    // ========================================================================
+    // 5. AXI4 read FSM -- one burst per line
+    // ========================================================================
+    localparam S_IDLE = 2'd0,
+               S_AR   = 2'd1,
+               S_R    = 2'd2;
+
+    reg [1:0]  state;
+    reg        arvalid_r;
+    reg [31:0] line_addr;
+
+    assign m_axi_arid    = AXI_ID;
+    assign m_axi_araddr  = line_addr;
+    assign m_axi_arlen   = (fb_width >> 2) - 16'd1;   // beats - 1
+    assign m_axi_arsize  = 3'b100;                    // 16 bytes = 128 bit
+    assign m_axi_arburst = 2'b01;                     // INCR
+    assign m_axi_arvalid = arvalid_r;
+
+    // ---------------------------------------------------------------
+    // Configuration sanity
+    // ---------------------------------------------------------------
+    // One burst fetches (arlen+1) beats, each beat holding four 32-bit pixels,
+    // while rd_row advances once fb_width pixels have been pushed into the
+    // FIFO. Those two only agree when fb_width is a multiple of the burst's
+    // pixel count, and arlen is only 8 bits wide.
+    //
+    // The expression above is 16 bits and the port is 8, so a wide fb_width is
+    // silently truncated: 1280 becomes arlen=63 (256 pixels per burst) and 1920
+    // becomes 223 (896 pixels), in both cases repeating or skipping pixels. The
+    // symptom is a frozen or torn picture with no error flag anywhere.
+    //
+    // Rather than silently reading the wrong addresses, refuse to start a line
+    // and raise cfg_error. Callers can then see a defined symptom.
+    wire [15:0] beats_w = fb_width >> 2;
+    wire cfg_bad = (fb_width[1:0] != 2'd0)      // must be a multiple of 4 pixels
+                || (beats_w == 16'd0)           // degenerate
+                || (beats_w > 16'd256);         // arlen is 8 bits: max 256 beats
+
+    assign cfg_error = cfg_bad;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            state     <= S_IDLE;
+            arvalid_r <= 1'b0;
+            line_addr <= 32'd0;
+        end else begin
+            case (state)
+                S_IDLE: begin
+                    if (need_line && !splitting && !cfg_bad) begin
+                        line_addr <= fb_base + (rd_row * fb_stride);
+                        arvalid_r <= 1'b1;
+                        state     <= S_AR;
+                    end
+                end
+
+                S_AR: begin
+                    if (m_axi_arready) begin
+                        arvalid_r <= 1'b0;
+                        state     <= S_R;
+                    end
+                end
+
+                S_R: begin
+                    // rlast terminates the burst; a beat counter would just be a
+                    // second copy of what the interconnect already tells us
+                    if (m_axi_rvalid && m_axi_rready && m_axi_rlast) begin
+                        state <= S_IDLE;
+                    end
+                end
+
+                // Never leave ARVALID asserted from an undefined state. Without
+                // this the read request could stay on the bus indefinitely and
+                // the FIFO would drain with nothing refilling it.
+                default: begin
+                    state     <= S_IDLE;
+                    arvalid_r <= 1'b0;
+                end
+            endcase
+        end
+    end
+
+endmodule

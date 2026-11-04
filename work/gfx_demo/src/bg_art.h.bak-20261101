@@ -1,0 +1,876 @@
+// ============================================================================
+// bg_art.h -- "GFX-1408 SURVIVOR" 精细背景生成器（RGB565，一次写进 DDR）
+//
+// 由 docs/114-背景集成方案.md §九 的图层规格实现。整数/定点算法：无浮点、无
+// libm、无动态内存、无 64 位除法；bss 只占约 1.3 KB（≤2 KB 的 RAM 约束）。
+//
+// 图层顺序：HUD 平色带 -> 天空竖向渐变 -> 多层彩云（蓝/紫/玫红/青）
+//           -> 银河斜带 -> 星点 -> 3 层远山 -> 远景断墙天际线
+//           -> 中景遗迹（左塔/右双塔/中央拱桥/拱窗）-> 透视石砖地面
+//           -> 前景断柱 -> 暗角（已折算进各层的颜色里）
+//
+// 估算启动耗时 0.5–0.7 s @100 MHz（未上板实测，以上板 mcycle 为准）。
+//
+// 接入方式（lead 只需改一行）：main.c 已经 #include "game.h"（提供 BG_BASE /
+// BG_STRIDE），在 game.h 之后 #include "bg_art.h"，然后把原来的 bg_build() 调用
+// 换成：
+//
+//     bg_build_art();
+//
+// 本文件不 include game.h，只依赖已定义的宏 BG_BASE（0x0B400000）与
+// BG_STRIDE（4096）。主机自测可用 -DBG_ART_BASE=.../-DBG_ART_STRIDE=... 覆盖。
+//
+// 注意：HUD 区（y<132）写平色 0x2104（= G_HUDBG，与 game_hud 文字底 cell 一致），
+// 128..131 行保留旧的 G_ACC（0x5AEB）分隔线；不画旧版左右 8px 侧栏（靠边缘暗角收边）。
+// bss 约束：只保留噪声格点（222 B）+ 山脊控制点（2×257×2 B）：≈1.3 KB；山脊逐列
+// 高度放进 DDR 临时工作区 BG_ART_SCRATCH（BG 位图之后，2 KB），不占片上 RAM。
+// ============================================================================
+#ifndef BG_ART_H
+#define BG_ART_H
+
+#include <stdint.h>
+
+#ifndef BG_ART_BASE
+#define BG_ART_BASE BG_BASE
+#endif
+#ifndef BG_ART_STRIDE
+#define BG_ART_STRIDE BG_STRIDE
+#endif
+
+// DDR 临时工作区：默认在 BG 位图之后 32 KB（BG_BASE+0x440000，窗口内、gallery 之外）。
+// 只存 1920 个山脊高度（uint16），不占 bss。主机自测可覆盖 BG_ART_SCRATCH。
+#ifndef BG_ART_SCRATCH
+#define BG_ART_SCRATCH (BG_ART_BASE + 0x440000u)
+#endif
+#define BA_TOPPTR ((volatile uint16_t *)(uintptr_t)BG_ART_SCRATCH)
+
+#if defined(_MSC_VER)
+#define BA_INLINE static __inline
+#else
+#define BA_INLINE static inline
+#endif
+
+// ---------------------------------------------------------------- geometry
+#define BA_W        1920u
+#define BA_H        1080u
+#define BA_HUD_H    132u
+#define BA_HORIZON  858u
+#define BA_SKY_H    726u            // 132 .. 857
+#define BA_NS       120u            // 星云采样点/行（步长 16 px）
+#define BA_SS       16u
+
+#define BA_HUDC     0x2104u   /* = G_HUDBG，与 game_hud 文字 cell 一致 */
+#define BA_ACCC     0x5AEBu
+
+#define BA_ROW_W(y) ((volatile uint16_t *)(uintptr_t)((uintptr_t)BG_ART_BASE + \
+                    (uint32_t)(y) * (uint32_t)BG_ART_STRIDE))
+
+// ---------------------------------------------------------------- helpers
+BA_INLINE uint16_t ba_rgb(int r, int g, int b)
+{
+    if (r < 0) r = 0; else if (r > 255) r = 255;
+    if (g < 0) g = 0; else if (g > 255) g = 255;
+    if (b < 0) b = 0; else if (b > 255) b = 255;
+    return (uint16_t)(((uint32_t)(r & 0xF8) << 8) |
+                      ((uint32_t)(g & 0xFC) << 3) |
+                      ((uint32_t)b >> 3));
+}
+
+BA_INLINE int ba_mix(int a, int b, int w)      // w: 0..256
+{
+    return a + (((b - a) * w) >> 8);
+}
+
+BA_INLINE int ba_clamp255(int v)
+{
+    return v < 0 ? 0 : (v > 255 ? 255 : v);
+}
+
+BA_INLINE uint16_t ba_dark(uint16_t c, int mul)   // mul: 0..256
+{
+    int r = (int)((c >> 11) & 31u), g = (int)((c >> 5) & 63u), b = (int)(c & 31u);
+    r = (r * mul) >> 8; g = (g * mul) >> 8; b = (b * mul) >> 8;
+    return (uint16_t)(((uint32_t)r << 11) | ((uint32_t)g << 5) | (uint32_t)b);
+}
+
+// ---------------------------------------------------------------- PRNG
+static uint32_t ba_rng_state;
+
+BA_INLINE uint32_t ba_rand(void)
+{
+    uint32_t x = ba_rng_state;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    ba_rng_state = x;
+    return x;
+}
+
+BA_INLINE int ba_rnd(int n)                    // 0 .. n-1
+{
+    return (int)((((ba_rand() >> 16) * (uint32_t)n)) >> 16);
+}
+
+static uint32_t ba_hash(uint32_t a)
+{
+    a ^= 0x9E3779B9u;
+    a ^= a >> 16; a *= 0x85EBCA6Bu;
+    a ^= a >> 13; a *= 0xC2B2AE35u;
+    a ^= a >> 16;
+    return a;
+}
+
+static uint32_t ba_isqrt(uint32_t v)           // 整数平方根，无除法
+{
+    uint32_t r = 0u, b = 1u << 30;
+    while (b > v) b >>= 2;
+    while (b) {
+        if (v >= r + b) { v -= r + b; r = (r >> 1) + b; }
+        else r >>= 1;
+        b >>= 2;
+    }
+    return r;
+}
+
+// ---------------------------------------------------------------- sky ramp
+// 7 个色标（t=0..255 对应 y=0..858），段内斜率预乘 256 手算好，避免运行时除法。
+static const uint16_t ba_sk_t[7]  = { 0u, 52u, 115u, 166u, 210u, 235u, 255u };
+static const int16_t  ba_sk_r[7]  = { 3, 6, 12, 20, 26, 29, 31 };
+static const int16_t  ba_sk_g[7]  = { 4, 8, 13, 19, 27, 37, 43 };
+static const int16_t  ba_sk_b[7]  = { 12, 22, 34, 46, 54, 55, 55 };
+static const int16_t  ba_sk_dr[6] = { 15, 24, 40, 35, 31, 26 };
+static const int16_t  ba_sk_dg[6] = { 20, 20, 30, 47, 102, 77 };
+static const int16_t  ba_sk_db[6] = { 49, 49, 60, 47, 10, 0 };
+
+static void ba_sky_rgb(uint32_t y, int *pr, int *pg, int *pb)
+{
+    uint32_t t = (y * 255u) / BA_HORIZON;
+    int i = 0;
+    int dt;
+    while (i < 6 && t > ba_sk_t[i + 1]) i++;
+    dt = (int)t - (int)ba_sk_t[i];
+    *pr = (int)ba_sk_r[i] + ((ba_sk_dr[i] * dt) >> 8);
+    *pg = (int)ba_sk_g[i] + ((ba_sk_dg[i] * dt) >> 8);
+    *pb = (int)ba_sk_b[i] + ((ba_sk_db[i] * dt) >> 8);
+}
+
+// ---------------------------------------------------------------- vignette
+// 逐像素现算（不建 3000 B 查找表）：横向 -44% 封顶、纵向 -18%，乘法分离近似。
+BA_INLINE int ba_vx_at(int x)
+{
+    int d = x - 960;
+    d *= d;
+    d = 255 - (d >> 13);
+    return d < 150 ? 150 : (d > 255 ? 255 : d);
+}
+
+BA_INLINE int ba_vy_at(int y)
+{
+    int d = y - 540;
+    d *= d;
+    d = 255 - (d >> 14);
+    return d > 255 ? 255 : d;
+}
+
+// ---------------------------------------------------------------- noise
+// 三个低频格点（512 / 256 / 128 px 一格），双线性采样后在 16 px 采样点上叠加成
+// 星云结构；格点越稀结构越大越"云"，太密会变成迷彩斑块（第一版踩过）。
+#define BA_L1W 6
+#define BA_L1H 4
+#define BA_L2W 9
+#define BA_L2H 5
+#define BA_L3W 17
+#define BA_L3H 9
+static uint8_t ba_l1[BA_L1W * BA_L1H];
+static uint8_t ba_l2[BA_L2W * BA_L2H];
+static uint8_t ba_l3[BA_L3W * BA_L3H];
+
+static void ba_noise_init(void)
+{
+    int i;
+    for (i = 0; i < BA_L1W * BA_L1H; i++) ba_l1[i] = (uint8_t)(ba_rand() >> 24);
+    for (i = 0; i < BA_L2W * BA_L2H; i++) ba_l2[i] = (uint8_t)(ba_rand() >> 24);
+    for (i = 0; i < BA_L3W * BA_L3H; i++) ba_l3[i] = (uint8_t)(ba_rand() >> 24);
+}
+
+BA_INLINE int ba_bilin(const uint8_t *L, int w, uint32_t cx, uint32_t fx,
+                       uint32_t cy, uint32_t fy)
+{
+    uint32_t o = cy * (uint32_t)w + cx;
+    int v00 = L[o], v01 = L[o + 1], v10 = L[o + (uint32_t)w], v11 = L[o + (uint32_t)w + 1];
+    int t = v00 + (((v01 - v00) * (int)fx) >> 8);
+    int u = v10 + (((v11 - v10) * (int)fx) >> 8);
+    return t + (((u - t) * (int)fy) >> 8);
+}
+
+// ---------------------------------------------------------------- nebula layers
+typedef struct {
+    int16_t  cx, cy;
+    uint32_t invx, invy;                      // 2^24 / r^2（平方和 >>16 后在 256 处=1 半径）
+    uint8_t  cr, cg, cb, gain, sel;           // sel: 0=fil1 1=fil2
+} ba_layer;
+
+static const ba_layer ba_neb[5] = {
+    {  540, 300,  31u, 186u,  44,  74, 190, 148, 0 },   // 蓝
+    { 1180, 250,  44u, 248u,  86,  58, 176, 118, 1 },   // 紫
+    { 1500, 470,  62u, 317u, 128,  56, 132,  87, 1 },   // 玫红
+    {  220, 560,  53u, 347u,  26,  84, 128, 102, 0 },   // 青（左）
+    {  980, 740,  12u, 465u,  26,  86, 104,  87, 1 }    // 青（地平线）
+};
+
+// ---------------------------------------------------------------- far ridge
+static int16_t ba_mid0[257];
+static int16_t ba_mid1[257];
+
+static void ba_ridge_gen(int baseY, int amp, int rough, uint32_t seed)
+{
+    int i, k, mn, mx, v;
+    ba_rng_state = seed;
+    v = 0;
+    for (i = 0; i < 257; i++) {
+        v += (int)(ba_rand() & 63u) - 31;
+        ba_mid0[i] = (int16_t)v;
+        ba_mid1[i] = (int16_t)((int)(ba_rand() & 255u) - 128);
+    }
+    // 低频：随机游走 + 3 次 1-2-1 平滑；高频：1 次平滑（山脊毛刺）
+    for (k = 0; k < 3; k++) {
+        int prev = ba_mid0[0];
+        for (i = 1; i < 256; i++) {
+            int cur = ba_mid0[i];
+            ba_mid0[i] = (int16_t)((prev + cur * 2 + ba_mid0[i + 1]) >> 2);
+            prev = cur;
+        }
+    }
+    {
+        int prev = ba_mid1[0];
+        for (i = 1; i < 256; i++) {
+            int cur = ba_mid1[i];
+            ba_mid1[i] = (int16_t)((prev + cur * 2 + ba_mid1[i + 1]) >> 2);
+            prev = cur;
+        }
+    }
+    // 归一化到 -128..128
+    mn = 32767; mx = -32768;
+    for (i = 0; i < 257; i++) { v = ba_mid0[i]; if (v < mn) mn = v; if (v > mx) mx = v; }
+    if (mx - mn < 8) mx = mn + 8;
+    for (i = 0; i < 257; i++)
+        ba_mid0[i] = (int16_t)((((int)ba_mid0[i] - mn) * 256) / (mx - mn) - 128);
+    mn = 32767; mx = -32768;
+    for (i = 0; i < 257; i++) { v = ba_mid1[i]; if (v < mn) mn = v; if (v > mx) mx = v; }
+    if (mx - mn < 8) mx = mn + 8;
+    for (i = 0; i < 257; i++)
+        ba_mid1[i] = (int16_t)((((int)ba_mid1[i] - mn) * 256) / (mx - mn) - 128);
+    // 合成到 1920 列：低频 3/4 + 高频 rough/256
+    for (i = 0; i < (int)BA_W; i++) {
+        uint32_t u = ((uint32_t)i * 256u) / (BA_W - 1u);
+        int idx = (int)(u >> 8);
+        int fr = (int)(u & 255u);
+        int lo, hi;
+        if (idx > 255) idx = 255;
+        lo = (int)ba_mid0[idx] + (((int)ba_mid0[idx + 1] - (int)ba_mid0[idx]) * fr >> 8);
+        hi = (int)ba_mid1[idx] + (((int)ba_mid1[idx + 1] - (int)ba_mid1[idx]) * fr >> 8);
+        v = baseY + (int)(((int32_t)lo * amp) / 128)
+                 + (int)(((int32_t)hi * amp * rough) / (128 * 256));
+        BA_TOPPTR[i] = (uint16_t)(v < 0 ? 0 : (v > (int)BA_HORIZON ? (int)BA_HORIZON : v));
+    }
+}
+
+static void ba_ridge_draw(int fr, int fg, int fb, int rimMul)
+{
+    int x, y, minTop = (int)BA_HORIZON;
+    uint16_t body = ba_rgb(fr, fg, fb);
+    uint16_t rim  = ba_rgb(fr + 16, fg + 22, fb + 38);
+    (void)rimMul;
+    for (x = 0; x < (int)BA_W; x++)
+        if ((int)BA_TOPPTR[x] < minTop) minTop = (int)BA_TOPPTR[x];
+    for (y = minTop; y <= (int)BA_HORIZON + 4 && y < (int)BA_H; y++) {
+        volatile uint16_t *row = BA_ROW_W((uint32_t)y);
+        for (x = 0; x < (int)BA_W; x++)
+            if ((int)BA_TOPPTR[x] <= y) row[x] = body;
+    }
+    for (x = 0; x < (int)BA_W; x++) {
+        int top = (int)BA_TOPPTR[x];
+        volatile uint16_t *row = BA_ROW_W((uint32_t)top);
+        row[x] = rim;
+    }
+}
+
+// ---------------------------------------------------------------- simple fills
+static void ba_rect(int x0, int y0, int x1, int y1, uint16_t c)
+{
+    int y;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > (int)BA_W) x1 = (int)BA_W;
+    if (y1 > (int)BA_H) y1 = (int)BA_H;
+    if (x1 <= x0 || y1 <= y0) return;
+    for (y = y0; y < y1; y++) {
+        volatile uint16_t *row = BA_ROW_W((uint32_t)y);
+        int x;
+        for (x = x0; x < x1; x++) row[x] = c;
+    }
+}
+
+static void ba_tri(int cx, int ytip, int halfw, int ybase, uint16_t c)
+{
+    int y, span = ybase - ytip;
+    if (span <= 0) return;
+    for (y = ytip; y < ybase; y++) {
+        int hw = (int)(((int32_t)(y - ytip) * halfw) / span);
+        int x0 = cx - hw, x1 = cx + hw + 1;
+        int xx;
+        volatile uint16_t *row;
+        if (x1 <= 0 || x0 >= (int)BA_W) continue;
+        if (x0 < 0) x0 = 0;
+        if (x1 > (int)BA_W) x1 = (int)BA_W;
+        row = BA_ROW_W((uint32_t)y);
+        for (xx = x0; xx < x1; xx++) row[xx] = c;
+    }
+}
+
+static void ba_crenel(int x0, int x1, int ytop, int step, int depth, uint16_t c)
+{
+    int x;
+    for (x = x0 + 2; x < x1 - 3; x += step)
+        ba_rect(x, ytop - depth, x + step / 2, ytop, c);
+}
+
+// 拱窗/拱门：上半圆 + 矩形，颜色用"天空渐变 x 0.55"（夜里的开口）
+static void ba_archhole(int cx, int top, int w, int h)
+{
+    int r = w / 2;
+    int y, x0, x1, dy;
+    if (r < 1) r = 1;
+    for (y = top - r; y < top + h && y < (int)BA_H; y++) {
+        int half, xx;
+        volatile uint16_t *row;
+        int sr, sg, sb;
+        uint16_t c;
+        if (y < 0) continue;
+        if (y < top) {
+            dy = top - y;
+            half = (int)ba_isqrt((uint32_t)(r * r - dy * dy));
+        } else {
+            half = r;
+        }
+        x0 = cx - half; x1 = cx + half + 1;
+        if (x1 <= 0 || x0 >= (int)BA_W) continue;
+        if (x0 < 0) x0 = 0;
+        if (x1 > (int)BA_W) x1 = (int)BA_W;
+        ba_sky_rgb((uint32_t)y, &sr, &sg, &sb);
+        c = ba_dark(ba_rgb(sr, sg, sb), 74);
+        row = BA_ROW_W((uint32_t)y);
+        for (xx = x0; xx < x1; xx++) row[xx] = c;
+    }
+}
+
+// ---------------------------------------------------------------- ruins
+static void ba_far_ruins(void)
+{
+    uint16_t body = ba_rgb(26, 32, 50);
+    uint16_t dark = ba_rgb(20, 25, 40);
+    int x = -20;
+    while (x < (int)BA_W) {
+        int bw = 12 + ba_rnd(35);
+        int bh = 14 + ba_rnd(71);
+        int top = (int)BA_HORIZON - bh;
+        int segs = 2 + ba_rnd(3);
+        int segW = bw / segs;
+        int s;
+        if (segW < 1) segW = 1;
+        for (s = 0; s < segs; s++) {
+            int sx0 = x + s * segW;
+            int sx1 = (s == segs - 1) ? (x + bw) : (sx0 + segW);
+            int st = top + ba_rnd(19) - 9;
+            ba_rect(sx0, st, sx1, (int)BA_HORIZON + 2, body);
+            if ((ba_rand() & 3u) == 0u) {
+                int cx;
+                for (cx = sx0 + 1; cx < sx1 - 3; cx += 9)
+                    ba_rect(cx, st - 6, cx + 4, st, body);
+            }
+        }
+        if ((ba_rand() & 7u) == 0u) {
+            int tx = x + 4 + ba_rnd(bw > 12 ? bw - 10 : 2);
+            int sh = 12 + ba_rnd(46);
+            ba_rect(tx, top - sh, tx + 3 + ba_rnd(3), top + 2, body);
+        } else if ((ba_rand() & 7u) == 0u) {
+            ba_rect(x + 2, top - 10, x + bw - 2, top, dark);
+        }
+        x += bw + ba_rnd(15) - 6;
+    }
+    // 三座远景地标（带三角尖顶）
+    {
+        static const int16_t lm[3][3] = { { 292, 42, 118 }, { 972, 36, 92 }, { 1442, 48, 136 } };
+        int i;
+        for (i = 0; i < 3; i++) {
+            int bx = lm[i][0], bw = lm[i][1], bh = lm[i][2];
+            ba_rect(bx, (int)BA_HORIZON - bh, bx + bw, (int)BA_HORIZON + 2, body);
+            ba_tri(bx + bw / 2, (int)BA_HORIZON - bh - 44, bw / 2 + 4, (int)BA_HORIZON - bh, body);
+        }
+    }
+}
+
+static void ba_mid_ruins(void)
+{
+    uint16_t body = ba_rgb(18, 22, 38);
+    uint16_t body2 = ba_rgb(34, 40, 62);
+    int i;
+    int y;
+
+    // ---- 中央断墙 + 拱桥
+    ba_rect(760, 738, 1180, 862, body);
+    ba_rect(760, 708, 830, 862, body);
+    ba_rect(1110, 688, 1180, 862, body);
+    // ---- 左侧大塔 + 附墙
+    ba_rect(46, 690, 206, 862, body);
+    ba_rect(46, 593, 96, 862, body);
+    ba_tri(110, 498, 40, 593, body);
+    ba_rect(206, 788, 330, 862, body);
+    ba_rect(258, 738, 300, 862, body);
+    ba_tri(279, 690, 21, 738, body);
+    ba_rect(330, 822, 430, 862, body);
+    // ---- 右侧双塔
+    ba_rect(1560, 648, 1652, 862, body);
+    ba_rect(1590, 558, 1614, 648, body);
+    ba_tri(1602, 506, 20, 558, body);
+    ba_rect(1710, 708, 1836, 862, body);
+    ba_rect(1742, 622, 1770, 718, body);
+    ba_tri(1756, 584, 14, 622, body);
+    ba_rect(1836, 810, 1900, 862, body);
+    // ---- 中景小教堂 + 细柱
+    ba_rect(1300, 762, 1370, 862, body);
+    ba_tri(1335, 708, 35, 762, body);
+    ba_rect(1410, 814, 1460, 862, body);
+    ba_rect(1360, 668, 1376, 862, body);
+    ba_rect(1420, 768, 1440, 862, body);
+    // ---- 地平线碎石堆
+    for (i = 0; i < 26; i++) {
+        int bx = -10 + ba_rnd((int)BA_W + 20);
+        int bw = 10 + ba_rnd(31);
+        int bh = 2 + ba_rnd(8);
+        ba_tri(bx + bw / 2, (int)BA_HORIZON - bh, bw / 2, (int)BA_HORIZON + 2, body);
+    }
+    // ---- 城垛：让墙/塔的顶边不再是一条直线
+    ba_crenel(46, 206, 690, 16, 10, body);
+    ba_crenel(206, 330, 788, 18, 8, body);
+    ba_crenel(760, 1180, 738, 20, 9, body);
+    ba_crenel(1560, 1652, 648, 16, 9, body);
+    ba_crenel(1710, 1836, 708, 18, 8, body);
+    ba_crenel(330, 430, 822, 16, 6, body);
+
+    // ---- 顶部月光高光（左缘/顶缘条纹）
+    for (y = 690; y < 862; y++) {
+        volatile uint16_t *row = BA_ROW_W((uint32_t)y);
+        row[46] = body2;
+        row[206] = body2;
+    }
+    for (y = 700; y < 862; y++) BA_ROW_W((uint32_t)y)[1560] = body2;
+    for (y = 760; y < 862; y++) BA_ROW_W((uint32_t)y)[1710] = body2;
+
+    // ---- 拱窗/拱门（在实体之后挖，颜色=暗化的天空）
+    ba_archhole(126, 740, 26, 104);
+    ba_archhole(120, 800, 14, 52);
+    ba_archhole(266, 700, 16, 34);
+    ba_archhole(1606, 640, 18, 48);
+    ba_archhole(1748, 760, 18, 58);
+    ba_archhole(1336, 780, 16, 44);
+    ba_archhole(770, 756, 22, 90);
+    ba_archhole(900, 786, 84, 76);
+    ba_archhole(1050, 786, 84, 76);
+    ba_archhole(1014, 780, 22, 50);
+    // 小窗（细长竖缝）
+    {
+        static const int16_t win[9][2] = {
+            { 172, 700 }, { 180, 716 }, { 300, 752 }, { 1610, 700 },
+            { 1756, 700 }, { 1764, 716 }, { 1340, 800 }, { 1428, 800 }, { 1368, 690 }
+        };
+        for (i = 0; i < 9; i++)
+            ba_rect(win[i][0], win[i][1], win[i][0] + 4, win[i][1] + 10,
+                    ba_rgb(10, 12, 20));
+    }
+}
+
+// ---------------------------------------------------------------- stars
+static void ba_stars(void)
+{
+    static const uint8_t pal[4][3] = {
+        { 205, 222, 255 }, { 150, 182, 238 }, { 255, 228, 194 }, { 164, 238, 255 }
+    };
+    int i;
+    for (i = 0; i < 1900; i++) {
+        int x = ba_rnd((int)BA_W);
+        int y = (int)BA_HUD_H + ba_rnd((int)BA_SKY_H);
+        uint32_t r = ba_rand();
+        int bri = (int)(r & 255u);
+        int bri2 = (bri * bri) >> 8;
+        int tone = (int)((r >> 8) & 255u);
+        int pi = tone < 148 ? 0 : (tone < 199 ? 1 : (tone < 230 ? 2 : 3));
+        int sc = 30 + bri2;
+        int rr = (pal[pi][0] * sc) >> 8;
+        int gg = (pal[pi][1] * sc) >> 8;
+        int bb = (pal[pi][2] * sc) >> 8;
+        uint16_t c;
+        volatile uint16_t *row;
+        if (rr > 255) rr = 255;
+        if (gg > 255) gg = 255;
+        if (bb > 255) bb = 255;
+        c = ba_rgb(rr, gg, bb);
+        row = BA_ROW_W((uint32_t)y);
+        row[x] = c;
+        if (bri > 236) {
+            uint16_t dim = ba_dark(c, 110);
+            if (x > 1) row[x - 1] = dim;
+            if (x < (int)BA_W - 2) row[x + 1] = dim;
+            if (y > (int)BA_HUD_H + 1) BA_ROW_W((uint32_t)(y - 1))[x] = dim;
+            if (y < (int)BA_HORIZON - 2) BA_ROW_W((uint32_t)(y + 1))[x] = dim;
+        }
+    }
+    // 银河带附近加密（沿直线 y = 60 + (x+160)*740/2220 撒 ±260 行）
+    for (i = 0; i < 520; i++) {
+        int x = ba_rnd((int)BA_W);
+        int ly = 60 + (int)(((int32_t)(x + 160) * 740) / 2220);
+        int y = ly - 260 + ba_rnd(520);
+        uint32_t r = ba_rand();
+        int bri = (int)(r & 255u);
+        int bri2 = (bri * bri) >> 8;
+        int tone = (int)((r >> 8) & 255u);
+        int pi = tone < 148 ? 0 : (tone < 199 ? 1 : (tone < 230 ? 2 : 3));
+        int sc = 24 + bri2;
+        int rr = (pal[pi][0] * sc) >> 8;
+        int gg = (pal[pi][1] * sc) >> 8;
+        int bb = (pal[pi][2] * sc) >> 8;
+        uint16_t c;
+        if (y < (int)BA_HUD_H) y = (int)BA_HUD_H;
+        if (y > (int)BA_HORIZON - 1) y = (int)BA_HORIZON - 1;
+        if (rr > 255) rr = 255;
+        if (gg > 255) gg = 255;
+        if (bb > 255) bb = 255;
+        c = ba_rgb(rr, gg, bb);
+        BA_ROW_W((uint32_t)y)[x] = c;
+    }
+}
+
+// ---------------------------------------------------------------- sky + nebula
+// 逐行流式计算：每行算 121 个采样点；算到第 i 个点时，就把"采样点 i-1 -> i"之间
+// 的 16 px 块插值写进 DDR。整行不缓存（省 363 B bss）。
+static void ba_sky_row(uint32_t y)
+{
+    int sr, sg, sb;
+    int vy, sf;
+    int dyp[5];
+    int c1y, f1y, c2y, f2y, c3y, f3y;
+    int32_t bandConst;
+    int i, l;
+    int pr = 0, pg = 0, pb = 0;
+    int have = 0;
+    uint32_t wx = 0;
+    volatile uint16_t *row = BA_ROW_W(y);
+
+    ba_sky_rgb(y, &sr, &sg, &sb);
+    vy = ba_vy_at((int)y);
+    {   // skyfade = ((HORIZON-y)/HORIZON)^0.25 * 255 （两层 sqrt 近似）
+        uint32_t t = ((BA_HORIZON - y) * 255u) / (BA_HORIZON - BA_HUD_H);
+        sf = (int)ba_isqrt(ba_isqrt(t << 8) << 8);
+        if (sf > 255) sf = 255;
+    }
+    c1y = (int)((y * 128u) >> 16);
+    f1y = (int)(((y * 128u) >> 8) & 255u);
+    c2y = (int)((y * 256u) >> 16);
+    f2y = (int)(((y * 256u) >> 8) & 255u);
+    c3y = (int)((y * 512u) >> 16);
+    f3y = (int)(((y * 512u) >> 8) & 255u);
+    for (l = 0; l < 5; l++) {
+        int dy = (int)y - (int)ba_neb[l].cy;
+        dyp[l] = (int)(((uint32_t)(dy * dy) * ba_neb[l].invy) >> 16);
+    }
+    bandConst = 251600 - 2220 * (int32_t)y;
+
+    for (i = 0; i < (int)BA_NS + 1; i++) {
+        int xi = i * 16;
+        uint32_t x = (uint32_t)xi;
+        uint32_t fx1 = x * 128u;
+        uint32_t fx2 = x * 256u;
+        uint32_t fx3 = x * 512u;
+        int n1 = ba_bilin(ba_l1, BA_L1W, fx1 >> 16, (fx1 >> 8) & 255u,
+                          (uint32_t)c1y, (uint32_t)f1y);
+        int n2 = ba_bilin(ba_l2, BA_L2W, fx2 >> 16, (fx2 >> 8) & 255u,
+                          (uint32_t)c2y, (uint32_t)f2y);
+        int n3 = ba_bilin(ba_l3, BA_L3W, fx3 >> 16, (fx3 >> 8) & 255u,
+                          (uint32_t)c3y, (uint32_t)f3y);
+        int f1 = (n1 * 3 + n2 * 3 + n3 * 2) >> 3;     // 大尺度云结构
+        int f2 = (n2 * 2 + n3 * 3 + n1) >> 3;         // 中尺度变化
+        int rid1, rid2, fil1, fil2, dust;
+        int accR = 0, accG = 0, accB = 0;
+        int r, g, b, vig;
+
+        rid1 = 2 * f1 - 255; if (rid1 < 0) rid1 = -rid1; rid1 = 255 - rid1;
+        rid2 = 2 * f2 - 255; if (rid2 < 0) rid2 = -rid2; rid2 = 255 - rid2;
+        fil1 = rid1 > 55 ? (rid1 - 55) * 2 : 0; if (fil1 > 255) fil1 = 255;
+        fil2 = rid2 > 70 ? (rid2 - 70) * 3 : 0; if (fil2 > 255) fil2 = 255;
+        dust = f2 > 140 ? (f2 - 140) * 4 : 0;   if (dust > 255) dust = 255;
+
+        for (l = 0; l < 5; l++) {
+            int dx = xi - (int)ba_neb[l].cx;
+            int q = (int)(((uint32_t)(dx * dx) * ba_neb[l].invx) >> 16) + dyp[l];
+            if (q < 256) {
+                int mask = 256 - q;
+                int st = ba_neb[l].sel ? fil2 : fil1;
+                int dens = (mask * (38 + ((st * 269) >> 8))) >> 8;
+                int core, val;
+                dens = (dens * (256 - ((dust * 130) >> 8))) >> 8;
+                core = (dens * dens) >> 9;
+                val = ((int)ba_neb[l].gain * (dens + ((core * 218) >> 8))) >> 8;
+                accR += ((int)ba_neb[l].cr * val) >> 8;
+                accG += ((int)ba_neb[l].cg * val) >> 8;
+                accB += ((int)ba_neb[l].cb * val) >> 8;
+            }
+        }
+        {   // 银河斜带
+            int32_t num = (int32_t)xi * 740 + bandConst;
+            uint32_t t2;
+            if (num < 0) num = -num;
+            t2 = ((uint32_t)num * 168u) >> 10;
+            if (t2 < 256u) {
+                uint32_t bq = ((256u - t2) * (256u - t2)) >> 8;
+                int mod = 90 + ((f2 * 140) >> 8);
+                int bv = (int)((bq * (uint32_t)mod) >> 8);
+                bv = (bv * sf) >> 8;
+                accR += (bv * 92) >> 9;
+                accG += (bv * 100) >> 9;
+                accB += (bv * 150) >> 9;
+            }
+        }
+        accR = (accR * sf) >> 8;
+        accG = (accG * sf) >> 8;
+        accB = (accB * sf) >> 8;
+        r = ba_clamp255(sr + accR);
+        g = ba_clamp255(sg + accG);
+        b = ba_clamp255(sb + accB);
+        vig = (ba_vx_at(xi > (int)BA_W - 1 ? (int)BA_W - 1 : xi) * vy) >> 8;
+        r = (r * vig) >> 8;
+        g = (g * vig) >> 8;
+        b = (b * vig) >> 8;
+        if (have) {
+            int k;
+            for (k = 0; k < (int)BA_SS; k++) {
+                int rr = (pr + (((r - pr) * k) >> 4)) >> 3;
+                int gg = (pg + (((g - pg) * k) >> 4)) >> 2;
+                int bb = (pb + (((b - pb) * k) >> 4)) >> 3;
+                row[wx++] = (uint16_t)(((uint32_t)rr << 11) |
+                                       ((uint32_t)gg << 5) | (uint32_t)bb);
+            }
+        }
+        pr = r; pg = g; pb = b; have = 1;
+    }
+}
+
+// ---------------------------------------------------------------- floor
+BA_INLINE void ba_span_vig(int y, int x0, int x1, int r, int g, int b)
+{
+    volatile uint16_t *row = BA_ROW_W((uint32_t)y);
+    int vy = ba_vy_at(y);
+    int x;
+    for (x = x0; x < x1; x++) {
+        int v = (ba_vx_at(x) * vy) >> 8;
+        int rr = (r * v) >> 8;
+        int gg = (g * v) >> 8;
+        int bb = (b * v) >> 8;
+        row[x] = (uint16_t)(((uint32_t)(rr >> 3) << 11) |
+                            ((uint32_t)(gg >> 2) << 5) |
+                            ((uint32_t)bb >> 3));
+    }
+}
+
+BA_INLINE void ba_span(int y, int x0, int x1, uint16_t c)
+{
+    volatile uint16_t *row = BA_ROW_W((uint32_t)y);
+    int x;
+    for (x = x0; x < x1; x++) row[x] = c;
+}
+
+static void ba_floor(void)
+{
+    int y = (int)BA_HORIZON + 4;
+    int h = 4;
+    while (y < (int)BA_H) {
+        int rh = h;
+        int t = ((y - ((int)BA_HORIZON + 4)) * 255) / 218;
+        int sc = 40 + ((int)(ba_isqrt((uint32_t)t << 8) * 215) >> 8);
+        int half = (960 * 256) / sc;
+        int u0 = ((960 - half) / 168) * 168;
+        int fogw = (y - ((int)BA_HORIZON + 4) < 44)
+                   ? (55 * (44 - (y - ((int)BA_HORIZON + 4)))) / 44 : 0;
+        int darkw = ((y - ((int)BA_HORIZON + 4)) * 40) / 218;
+        int gr = ba_mix(9, 40, fogw);
+        int gg = ba_mix(10, 52, fogw);
+        int gb = ba_mix(16, 68, fogw);
+        int u = u0;
+        int y2;
+        if (y + rh > (int)BA_H) rh = (int)BA_H - y;
+        for (y2 = y; y2 < y + rh; y2++) {
+            uint16_t gc = ba_rgb(gr, gg, gb);
+            ba_span(y2, 0, (int)BA_W, gc);
+        }
+        while (u < 960 + half) {
+            int x0 = 960 + (int)(((int32_t)(u - 960) * sc) >> 8);
+            int x1 = 960 + (int)(((int32_t)(u + 168 - 960) * sc) >> 8);
+            uint32_t hs = ba_hash((uint32_t)(y * 92821) + (uint32_t)(u / 168) * 68917u
+                                  + 0x1234u);
+            int shade = (int)((hs >> 9) % 15u) - 7;
+            int br = ba_clamp255(30 + shade);
+            int bg = ba_clamp255(34 + (shade * 9) / 10);
+            int bb = ba_clamp255(47 + (shade * 8) / 10);
+            int tr, tg, tb;
+            u += 168;
+            if (x1 > (int)BA_W) x1 = (int)BA_W;
+            if (x0 < 0) x0 = 0;
+            if (x1 - x0 < 2) continue;
+            tr = ba_mix(br, 40, fogw); tg = ba_mix(bg, 52, fogw); tb = ba_mix(bb, 68, fogw);
+            tr = (tr * (256 - darkw)) >> 8;
+            tg = (tg * (256 - darkw)) >> 8;
+            tb = (tb * (256 - darkw)) >> 8;
+            for (y2 = y + 1; y2 < y + rh; y2++)
+                ba_span_vig(y2, x0 + 1, x1 - 1, tr, tg, tb);
+            if (y + 1 < y + rh)
+                ba_span(y + 1, x0 + 1, x1 - 1,
+                        ba_rgb(ba_clamp255(tr + 16), ba_clamp255(tg + 18), ba_clamp255(tb + 24)));
+            if (y + rh - 1 > y + 1)
+                ba_span(y + rh - 1, x0 + 1, x1 - 1,
+                        ba_rgb((tr * 180) >> 8, (tg * 180) >> 8, (tb * 180) >> 8));
+            {
+                int x;
+                for (x = x0 + 1; x < x0 + 2 && x < x1; x++) {
+                    int yy;
+                    for (yy = y + 2; yy < y + rh - 1; yy++)
+                        BA_ROW_W((uint32_t)yy)[x] =
+                            ba_rgb(ba_clamp255(tr + 8), ba_clamp255(tg + 9), ba_clamp255(tb + 12));
+                }
+            }
+            if ((hs >> 7) % 100u < 38u) {
+                int blobs = 3 + (int)((hs >> 13) % 4u);
+                int b;
+                for (b = 0; b < blobs; b++) {
+                    int bw = 2 + (int)((hs >> (b + 3)) % 9u);
+                    int bh = 1 + (int)((hs >> (b + 5)) % 3u);
+                    int bx = x0 + 1 + (int)((hs >> (b * 3 + 3)) % (uint32_t)(x1 - x0 - bw - 2 > 0 ? x1 - x0 - bw - 2 : 1));
+                    int by = y + 1 + (int)((hs >> (b * 3 + 7)) % (uint32_t)(rh - bh - 1 > 0 ? rh - bh - 1 : 1));
+                    int yy;
+                    for (yy = by; yy < by + bh && yy < y + rh - 1; yy++) {
+                        volatile uint16_t *row = BA_ROW_W((uint32_t)yy);
+                        int xx;
+                        for (xx = bx; xx < bx + bw && xx < x1 - 1; xx++)
+                            row[xx] = ba_rgb(30, 58, 45);
+                    }
+                }
+            }
+            if ((hs >> 15) % 100u < 36u && x1 - x0 > 16 && rh > 5) {
+                int sx = x0 + 2 + (int)((hs >> 19) % (uint32_t)(x1 - x0 - 4));
+                int sy = y + 2 + (int)((hs >> 21) % (uint32_t)(rh - 2));
+                int ln = rh + 3;
+                int k;
+                for (k = 0; k < ln; k++) {
+                    int yy = sy + k;
+                    int xx = sx + (k >> 1);
+                    if (yy >= y + rh - 1 || xx >= x1 - 1) break;
+                    BA_ROW_W((uint32_t)yy)[xx] = ba_rgb(7, 8, 14);
+                    BA_ROW_W((uint32_t)yy)[xx + 1] = ba_rgb(52, 58, 78);
+                }
+            }
+            if ((hs >> 5) % 4u == 0u) {
+                int px = x0 + 2 + (int)((hs >> 11) % (uint32_t)(x1 - x0 - 3));
+                int py = y + 1 + (int)((hs >> 17) % (uint32_t)(rh - 1));
+                BA_ROW_W((uint32_t)py)[px] = ba_rgb(60, 66, 86);
+                if (px + 1 < x1 - 1) BA_ROW_W((uint32_t)py)[px + 1] = ba_rgb(42, 47, 62);
+            }
+        }
+        y += rh;
+        h = h + (h >> 2) + 1;
+    }
+}
+
+// ---------------------------------------------------------------- foreground
+static void ba_foreground(void)
+{
+    static const int16_t fg[7][2] = {
+        { 0, 1012 }, { 18, 986 }, { 34, 994 }, { 52, 972 },
+        { 74, 988 }, { 96, 1002 }, { 118, 1080 }
+    };
+    int x, i;
+    for (x = 0; x < (int)BA_W; x++) {
+        int top;
+        int y;
+        if (x < 118) {
+            i = 0;
+            while (i < 5 && x > fg[i + 1][0]) i++;
+            top = (int)fg[i][1] + (int)(((int32_t)(fg[i + 1][1] - fg[i][1]) * (x - fg[i][0]))
+                                       / (fg[i + 1][0] - fg[i][0]));
+        } else if (x >= (int)BA_W - 118) {
+            int xm = (int)BA_W - 1 - x;
+            i = 0;
+            while (i < 5 && xm > fg[i + 1][0]) i++;
+            top = (int)fg[i][1] + (int)(((int32_t)(fg[i + 1][1] - fg[i][1]) * (xm - fg[i][0]))
+                                       / (fg[i + 1][0] - fg[i][0]));
+            if (top > 1012 && xm > 96) top = 1012;
+        } else {
+            continue;
+        }
+        if (top >= (int)BA_H) continue;
+        for (y = top; y < (int)BA_H; y++)
+            BA_ROW_W((uint32_t)y)[x] = ba_rgb(4, 5, 10);
+        BA_ROW_W((uint32_t)top)[x] = ba_rgb(22, 28, 46);
+        if (top + 1 < (int)BA_H) BA_ROW_W((uint32_t)(top + 1))[x] = ba_rgb(11, 13, 22);
+    }
+}
+
+// ---------------------------------------------------------------- HUD band
+static void ba_hud(void)
+{
+    int y, x;
+    for (y = 0; y < (int)BA_HUD_H; y++) {
+        volatile uint16_t *row = BA_ROW_W((uint32_t)y);
+        for (x = 0; x < (int)BA_W; x++) row[x] = BA_HUDC;
+    }
+    for (y = (int)BA_HUD_H - 4; y < (int)BA_HUD_H; y++) {
+        volatile uint16_t *row = BA_ROW_W((uint32_t)y);
+        for (x = 0; x < (int)BA_W; x++) row[x] = BA_ACCC;
+    }
+}
+
+// ---------------------------------------------------------------- main entry
+// 一次调用把整张 1920x1080 背景写进 DDR（BG_BASE，行跨度 BG_STRIDE）。
+static void bg_build_art(void)
+{
+    int x, y;
+
+    ba_rng_state = 0x5EED1234u;
+    ba_noise_init();
+
+    // HUD 平色带 + 分隔线
+    ba_hud();
+
+    // 天空 + 星云 + 银河（逐行：先算 121 个采样点，再水平插值到 1920 px）
+    for (y = (int)BA_HUD_H; y < (int)BA_HORIZON; y++)
+        ba_sky_row((uint32_t)y);
+
+    // 星点（在星云之上、山/遗迹之下）
+    ba_stars();
+
+    // 3 层远山
+    ba_ridge_gen((int)BA_HORIZON - 62, 96, 140, 0xA11CEu); ba_ridge_draw(50, 62, 84, 0);
+    ba_ridge_gen((int)BA_HORIZON - 26, 64, 143, 0xB0B05u); ba_ridge_draw(32, 38, 59, 0);
+    ba_ridge_gen((int)BA_HORIZON - 7, 34, 146, 0xC0FFEEu); ba_ridge_draw(17, 20, 35, 0);
+
+    // 远景天际线 + 中景遗迹
+    ba_far_ruins();
+    ba_mid_ruins();
+
+    // 透视石砖地面
+    ba_floor();
+
+    // 前景断柱
+    ba_foreground();
+
+    // 最底一行压暗（收边）
+    for (x = 0; x < (int)BA_W; x++)
+        BA_ROW_W((uint32_t)(BA_H - 1))[x] = ba_dark(BA_ROW_W((uint32_t)(BA_H - 1))[x], 150);
+}
+
+#endif // BG_ART_H

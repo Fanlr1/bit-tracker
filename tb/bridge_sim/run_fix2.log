@@ -1,0 +1,53 @@
+t=0 | arw v=0 r=x wr=0 | W v=0 r=x last=1 | b v=x r=x | r v=x r=x | s: bus=x awreg=x | brg: lock=x selR=x cmdv=0 zz=x wcrdy=x rcrdy=x
+t=1 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=2 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=3 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=4 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=5 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=6 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=7 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=8 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=9 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=10 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=11 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=12 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=13 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+
+########## 阶段 1：纯读（先不做任何写）##########
+t=14 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=15 | arw v=1 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=1 zz=1 wcrdy=1 rcrdy=1
+t=16 | arw v=0 r=0 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=17 | arw v=0 r=0 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=18 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=1 r=1 | s: bus=0 awreg=0 | brg: lock=0 selR=1 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+== [���������BPP] 收到响应 data=00000004 (等待 2 拍)
+
+########## 阶段 2：写一次 BPP=4 ##########
+t=19 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=20 | arw v=1 r=1 wr=1 | W v=1 r=1 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=1 zz=1 wcrdy=1 rcrdy=1
+t=21 | arw v=0 r=0 wr=1 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=2 awreg=1 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=22 | arw v=0 r=0 wr=1 | W v=0 r=0 last=1 | b v=1 r=0 | r v=0 r=0 | s: bus=2 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=23 | arw v=0 r=0 wr=1 | W v=0 r=0 last=1 | b v=1 r=1 | r v=0 r=0 | s: bus=2 awreg=0 | brg: lock=1 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+== [�����BPP] 收到响应 data=00000004 (等待 2 拍)
+
+########## 阶段 3：写之后再读同一个地址 ##########
+t=24 | arw v=0 r=0 wr=1 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=25 | arw v=1 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=1 zz=1 wcrdy=1 rcrdy=1
+t=26 | arw v=1 r=0 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=1 zz=1 wcrdy=1 rcrdy=1
+t=27 | arw v=1 r=0 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=1 zz=1 wcrdy=1 rcrdy=1
+t=28 | arw v=1 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=1 r=1 | s: bus=0 awreg=0 | brg: lock=0 selR=1 cmdv=1 zz=1 wcrdy=1 rcrdy=1
+t=29 | arw v=0 r=0 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=30 | arw v=0 r=0 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=31 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=1 r=1 | s: bus=0 awreg=0 | brg: lock=0 selR=1 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+== [���������BPP] 收到响应 data=00000004 (等待 2 拍)
+
+########## 阶段 4：再读另一个地址 ##########
+t=32 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=33 | arw v=1 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=1 zz=1 wcrdy=1 rcrdy=1
+t=34 | arw v=0 r=0 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=35 | arw v=0 r=0 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=0 r=0 | s: bus=0 awreg=0 | brg: lock=0 selR=0 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+t=36 | arw v=0 r=1 wr=0 | W v=0 r=0 last=1 | b v=0 r=0 | r v=1 r=1 | s: bus=0 awreg=0 | brg: lock=0 selR=1 cmdv=0 zz=1 wcrdy=1 rcrdy=1
+== [�����������FRAME_CNT] 收到响应 data=00000000 (等待 2 拍)
+
+===== 结果：errors=0 =====
+RESULT: NO-DEADLOCK (四阶段全部完成)
+tb/bridge_sim/tb_bridge.v:286: $finish called at 370000 (1ps)

@@ -1,0 +1,1833 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GFX-1408 SURVIVOR -- 浏览器可玩原型</title>
+<!--
+================================================================================
+GFX-1408 SURVIVOR  ·  HTML/Canvas 可玩原型（单文件、无外部依赖、双击即玩）
+================================================================================
+用途：在写/调固件之前，用浏览器验证玩法、手感、数值、视觉与 HUD 布局。
+逻辑分辨率固定 1920x1080（与固件 RGB565 帧缓冲一致），按窗口等比缩放显示。
+
+【怎么玩】
+  G / Enter .......... 开始（TITLE）
+  方向键 / WASD ...... 移动（8 方向，对角 3/4 归一化）；按住连续移动
+  自动攻击 ........... 飞刀自动朝最近敌人发射；升级到 环绕球 后自动旋转碰撞
+  P .................. 暂停 / 继续
+  ↑ / W / Z / Space .. 升级菜单里确认（← → 选择）
+  H .................. 显示/隐藏帮助面板（按键、调参、URL 参数）
+  F1 ................. 调试信息（各池占用、每帧碰撞测试数、关键数值）
+  Q / Esc ............ 回 TITLE（固件里是回 demo 场景）
+  R .................. 重开一局
+  M .................. 静音开关（原型无音效，占位）
+  , / . .............. 时间流速 0.5x / 2x（只为调参和截图，固件没有）
+
+【怎么调参】
+  本文件顶部 CONFIG 对象集中了全部数值（速度/伤害/刷怪节奏/解锁时间/池上限/
+  升级步长/磁吸半径/颜色……）。改数字 -> 保存 -> 浏览器刷新 即生效。
+  每一项都有中文注释说明它对应 game.h 里的哪个变量。
+  带 SHOW_ 前缀的是纯表现开关（不影响玩法数值）。
+
+【URL 参数（截图 / 复现 / 数值平衡用）】
+  ?auto=title|play|upgrade|pause|over   进页面直接进入某个状态
+  &ff=SEC      用 AI 自动驾驶快进 SEC 秒（配合 auto=play 得到密集战场截图）
+  &static=1    只渲染一帧就停（截图确定性）
+  &seed=N      随机种子（同 seed 同结果，便于复现）
+  &dbg=1       进页面就打开 F1 调试面板        &help=1 进页面就打开帮助面板
+  &stress=1    把所有池塞满（480+24 敌人 / 150 宝石 / 120 粒子 / 80 飞刀 / 6 球），
+               用来看"满负载"画面（正常玩到不了这个数量，见下面【原型验证结论】）
+  &sprite=1    只画精灵总览表（核对美术/色键/尺寸，assets 对素材时用）
+  &sim=N       无渲染跑 N 帧 AI 生存模拟，把统计打到页面上（数值平衡用）
+  &trials=K    sim 重复 K 局（不同种子），用来估生存时间分布
+  &bench=N     同步跑 N 帧 step+render，报每帧 JS/Canvas 提交耗时（&stress=1 为满池）
+  例：prototype.html?auto=play&ff=90&static=1    -- 90 秒时的战场截图
+      prototype.html?sim=5400&trials=5           -- 5 局 x 90 秒的平衡数据
+      prototype.html?bench=300&stress=1          -- 满池绘制成本
+
+【配套文件】
+  tools/prototype-snapshot.py   一条命令用无头 Edge/Chrome 重拍全套验证截图
+                                -> tools/shots/01-title.png ... 10-stress-pool.png
+
+【与固件的对应关系】
+  * 布局/颜色/状态机/池上限/HUD 文案/刷怪 ramp/升级步长 全部照 work/gfx_demo/src/game.h；
+  * 精灵图 = tools/assets.json（assets 队友的最终素材，已整份内联进本文件：
+    索引色 + 色键透明，A8x9 / A16x4 / A32x2 全套），所以原型画的像素就是固件要显示的那份；
+    内置的 ASCII 美术（tools/gen_assets.py 那一份）只作兜底，CONFIG.USE_ASSET_SRC=false 可切回；
+  * 如果 assets 再改素材：重跑 gen_assets.py 更新 assets.json 后，用一小段脚本把
+    assets.json 的 palette/sprites 重新内联进来即可（本文件里搜 ASSET_SRC）。
+  * 已知有意偏差（都写进了 CONFIG，可一键切回固件行为）：
+      - 敌人对角移动：game.h 的 (sx*step)>>4 在 step<=1 时恒为 0，A/C/胖子
+        的斜向速度实际是 0；原型按设计意图（逐轴 1/16 亚像素累加）实现。
+      - 敌人从屏外走入：game.h 生成后立刻被 clamp 进场，看不到走入过程；
+        原型不 clamp，从四边外走进来（视觉更顺）。
+      - 飞刀命中：固件每帧只做一次点检测（26px/帧 会穿怪）；原型默认 2 个子步，
+        CONFIG.KNIFE_SUBSTEPS=1 可复现固件行为。
+      - 飞刀旋转：固件没有旋转指令，原型 CONFIG.KN_ROTATE 默认开（更好看）;
+        固件若要同样效果需要 8 方向素材。
+      - 磁吸半径：任务书写 60px，game.h 是 70，这里跟 game.h（CONFIG.MAGNET）。
+      - 宝石掉落 75%（game.h）而不是设计书写的 50%；粒子 3/8 个而不是 6 个。
+
+【原型验证结论（AI 自动驾驶，3 局 x 180 s；不是真人成绩，只看相对关系）】
+  * 生存 59~119 s（平均 80 s），离"演示 5~10 分钟"的目标差很远；
+  * 同屏敌人实际只到 180~380，从未顶到 480+24 的上限 -> "海量"卖点要靠额外手段；
+  * 敌人平均距离玩家约 500 px，只有 30~36% 在 300 px 内 -> 战场太大把海量摊薄了;
+  * 宝石池 150 经常满，拾取率约 37%（1340 杀只吃到 368 点经验）-> 磁吸 70 太小;
+  * 8x8 精灵只占屏宽 0.42%，满池 480 个的覆盖率 1.4% -> 敌人看起来像色点;
+  * 飞刀 x 敌人暴力检测：60 s 时 6 把刀 x 2 子步 x 181 敌 = 2184 次/帧；满池最坏
+    80 x 480 = 38400 次/帧（RV32 约 3~4 ms），占掉 CPU 预算的一大半。
+  调参建议（都可直接在 CONFIG 里试）：见交付报告 / 让 lead 决定。
+================================================================================
+-->
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#040604; overflow:hidden; }
+  #wrap { position:fixed; left:0; top:0; right:0; bottom:0; display:flex;
+          align-items:center; justify-content:center; }
+  canvas { display:block; image-rendering:pixelated; image-rendering:crisp-edges;
+           -ms-interpolation-mode:nearest-neighbor; background:#080c08;
+           box-shadow:0 0 0 1px #232b23; }
+  #simout { position:absolute; left:0; top:0; margin:0; padding:10px 14px;
+            color:#9fe8a0; background:rgba(0,0,0,0.88); font:13px/1.5 Consolas,monospace;
+            white-space:pre; display:none; z-index:9; max-height:100%;
+            overflow:auto; border-right:1px solid #2a3a2a; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="1920" height="1080"></canvas></div>
+<pre id="simout"></pre>
+<script>
+'use strict';
+
+// 任何脚本错误都写进 document.title，方便无头浏览器 --dump-dom 抓（正常应保持页面标题）
+window.addEventListener('error', function (ev) {
+  document.title = 'JS ERROR: ' + (ev.message || 'unknown');
+});
+
+// ============================================================================
+// 1. CONFIG -- 所有可调参数。改完保存 + 刷新页面即生效。
+// ============================================================================
+var CONFIG = {
+  // ------------------------------------------------------------- 屏幕几何
+  W: 1920, H: 1080,              // 逻辑分辨率（固件 FB 1920x1080 RGB565）
+  HUD_H: 100,                    // HUD 区高度 y 0..99（game.h G_HUD_H）
+  SEP_Y: 96, SEP_H: 4,           // 分隔线 y 96..99（game.h game_bg）
+  BORDER: 8,                     // 左右边框宽 x 0..7 / 1912..1919
+  C_HUD: 0x10A2,                 // HUD 背景（深灰绿）
+  C_BG: 0x0861,                  // 战场纯色（脏矩形擦除色）
+  C_ACC: 0x5AEB,                 // 分隔线亮色
+  C_BORDER: 0x18E3,              // 边框色
+  // 战场可用范围，右侧/下侧开区间（game.h GX_LO/GX_HI/GY_LO/GY_HI）
+  X_LO: 8, X_HI: 1912, Y_LO: 100, Y_HI: 1080,
+
+  // ------------------------------------------------------------- 玩家
+  P_SIZE: 32,                    // 32x32（game.h 用 A32_PLAYER）
+  P_HP: 100,                     // 初始 HP（game.h g_life=100）
+  P_SPEED: 8,                    // 每帧像素（game.h g_pmove=8）
+  DIAG_N: 3, DIAG_D: 4,          // 对角速度 3/4
+  P_INV: 40,                     // 受击无敌帧（game.h g_inv=40）
+  BLINK_DIV: 4,                  // 无敌闪烁周期：每 4 帧切一次半透明
+  HURT_ALPHA: 0.5,               // 受击闪烁的半透明度（固件 BLIT alpha=128）
+  P_START_X: -1, P_START_Y: -1,  // -1 = 自动居中（game.h 居中）
+
+  // ------------------------------------------------------------- 飞刀（自动攻击）
+  KN_MAX: 80,                    // 同屏上限（game.h KN_MAX）
+  KN_INT: 18,                    // 每 18 帧一把（game.h g_kn_int）
+  KN_MIN_INT: 6,                 // FIRE RATE 升到 6 帧为止（game.h >6 才减）
+  KN_INT_STEP: 3,                // 每次 -3 帧
+  KN_N_MAX: 3,                   // 多重飞刀上限
+  KN_DMG: 3,                     // 初始伤害（game.h g_kn_dmg=3）
+  KN_DMG_STEP: 2,                // POWER 每次 +2
+  KN_SPEED: 26,                  // 26 px/帧（game.h D8X*26>>4）
+  KN_SUBSTEPS: 2,                // 命中检测子步数；1 = 固件行为（会穿怪）
+  KN_ROTATE: true,               // 按飞行方向旋转（固件无旋转，见文件头注释）
+
+  // ------------------------------------------------------------- 环绕球
+  ORB_MAX: 6,                    // 上限 6 个
+  ORB_R: 44,                     // 环绕半径（game.h OCX/OCY 表，44/31/17/0）
+  ORB_DMG: 6,                    // 伤害（game.h）
+  ORB_COOL: 12,                  // 同一敌人 12 帧冷却（game.h e->t=12）
+
+  // ------------------------------------------------------------- 敌人池
+  E8_MAX: 480,                   // 8x8 池（game.h E8_MAX）
+  E16_MAX: 24,                   // 16x16 池（game.h E16_MAX）
+  //   hp     : 生命值
+  //   v16    : 速度，单位 1/16 像素每帧（game.h gobj.vx）
+  //   vdiff  : 每 +1 难度追加的 1/16 速度（game.h g_diff 相关项）
+  //   dmg    : 接触伤害
+  //   size   : 精灵边长
+  ENEMY: {
+    A:     { hp: 3,  v16: 16, vdiff: 2, dmg: 8,  size: 8,  art: 'A' },
+    B:     { hp: 2,  v16: 29, vdiff: 2, dmg: 6,  size: 8,  art: 'B' },
+    C:     { hp: 6,  v16: 13, vdiff: 2, dmg: 12, size: 8,  art: 'C' },
+    BIG:   { hp: 25, v16: 8,  vdiff: 1, dmg: 20, size: 16, art: 'BIG' },
+    ELITE: { hp: 80, v16: 11, vdiff: 1, dmg: 15, size: 16, art: 'ELITE' }
+  },
+  SPAWN_EVERY: 20,               // 每 20 帧一批（game.h g_tick%20)
+  SPAWN_BASE: 3,                 // 批量 = 3 + diff（game.h）
+  SPAWN_MAX: 9,                  // 上限 9（game.h）
+  DIFF_EVERY: 30,                // 每 30 秒 diff+1（game.h g_diff=sec/30）
+  C_SEC: 30,                     // 30 秒起混入 C 紫怪（game.h）
+  BIG_SEC: 60,                   // 60 秒起混入胖子（game.h）
+  BIG_PCT: 6,                    // 胖子占 6%（game.h r<6）
+  ELITE_FIRST: 45,               // 第 45 秒出第一个精英（game.h g_elite_cd=45*60）
+  ELITE_EVERY: 45,               // 之后每 45 秒一个
+  CONTACT8: 18,                  // 8x8 敌人接触判定半宽（game.h ddx>-18&&<18）
+  CONTACT16: 22,                 // 16x16 敌人接触判定半宽
+  SEPARATE: true,                // 敌人互相分离（简单网格排斥，见需求 6）
+  SEP_CELL: 32, SEP_R: 10, SEP_PUSH: 1,   // 网格边长 / 排斥半径 / 每帧推力
+
+  // ------------------------------------------------------------- 宝石与经验
+  GEM_MAX: 150,                  // 宝石池（game.h GEM_MAX）
+  GEM_DROP_PCT: 75,              // 击杀掉宝石概率 %（game.h rand&3!=0 -> 75%）
+  MAGNET: 70,                    // 磁吸半径（game.h g_magnet=70；设计书写 60）
+  MAGNET_STEP: 20, MAGNET_MAX: 160,        // MAGNET 升级 +20，上限 160
+  GEM_PULL: 10,                  // 磁吸速度 px/帧（game.h sp=10）
+  PICK_R: 14,                    // 拾取判定（game.h ax<14 && ay<14）
+  EXP_BASE: 5, EXP_LV: 4,        // 升级阈值 5 + 4*level（game.h）
+
+  // ------------------------------------------------------------- 粒子
+  PA_MAX: 120,                   // 粒子池（game.h PA_MAX）
+  PA_N8: 3, PA_N16: 8,           // 8x8 死亡 3 个、16x16 死亡 8 个（game.h）
+  PA_LIFE_MIN: 16, PA_LIFE_MAX: 30,        // 寿命帧数（game.h 16+rand%15）
+  PA_VMAX: 8,                    // 初速 -8..8，之后每帧 /2（game.h）
+
+  // ------------------------------------------------------------- 流程
+  OVER_FRAMES: 180,              // 结算 3 秒回 TITLE（game.h g_over_cd=180）
+  SEED: 0x5EED1234,              // 与 game.h g_rng 初值一致，便于对拍
+  BEST_KEY: 'gfx1408_best_sec',  // 最高纪录（localStorage，file:// 可能不可用）
+
+  // ------------------------------------------------------------- 表现 / 调试开关
+  USE_ASSET_SRC: true,           // 用内嵌 assets.json 的像素图（false=退回内置 ASCII 美术）
+  SHOW_FPS: true,                // 右下角 FPS + 帧时间（需求 12）
+  SHOW_HPBAR: true,              // 胖子/精英受损时头顶血条（固件暂无，建议加）
+  START: 'TITLE',                // 初始状态：TITLE / PLAY
+  KNIFE_WAKE: true               // 飞刀拖尾（纯表现）
+};
+
+// ============================================================================
+// 2. 颜色 / 数学 / RNG
+// ============================================================================
+// RGB565 -> CSS，和固件显示出来的颜色一致
+function c565(v) {
+  var r = (v >> 11) & 31, g = (v >> 5) & 63, b = v & 31;
+  return 'rgb(' + Math.round(r * 255 / 31) + ',' + Math.round(g * 255 / 63) +
+         ',' + Math.round(b * 255 / 31) + ')';
+}
+// 0..255 -> RGB565（与 tools/gen_assets.py 的 rgb() 相同，>>3 / >>2 / >>3）
+function rgb565(r, g, b) {
+  return ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+}
+
+var COL = {
+  hud:    c565(CONFIG.C_HUD),
+  bg:     c565(CONFIG.C_BG),
+  acc:    c565(CONFIG.C_ACC),
+  border: c565(CONFIG.C_BORDER),
+  text:   c565(0xFFFF),   // HUD 行1 白
+  green:  c565(0x07E0),   // HUD 行2 绿
+  dim:    c565(0x8410),   // HUD 行3 灰紫
+  cyan:   c565(0x07FF),   // 标题
+  yellow: c565(0xFFE0),
+  red:    c565(0xF800),
+  orange: c565(0xFD20),   // 粒子
+  black:  c565(0x0000)
+};
+
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function imin(a, b) { return a < b ? a : b; }
+function imax(a, b) { return a > b ? a : b; }
+// C 的整数除法（向零取整）：JS 的 / 是浮点
+function idiv(a, b) { return Math.trunc(a / b); }
+
+// 与 game.h g_rand() 相同的 xorshift-multiply（32 位无符号，可复现）
+var rngState = 0;
+function seedRng(s) { rngState = s >>> 0; }
+function rnd32() {
+  rngState = (rngState + 0x9E3779B9) >>> 0;
+  var z = rngState;
+  z = Math.imul(z ^ (z >>> 16), 0x85EBCA6B) >>> 0;
+  z = Math.imul(z ^ (z >>> 13), 0xC2B2AE35) >>> 0;
+  return (z ^ (z >>> 16)) >>> 0;
+}
+function rnd(n) { return n <= 0 ? 0 : (rnd32() % n); }
+function rndRange(a, b) { return a + rnd(b - a + 1); }
+
+// ============================================================================
+// 3. 5x7 点阵字体（照抄 hud.h 的 HUD_DIG / HUD_LET，列主序，bit0 = 最上面一行）
+//    固件用 CPU 直接写像素；原型用离屏字形图集 + drawImage，视觉完全一致。
+// ============================================================================
+var F_DIG = [
+  [0x3E,0x51,0x49,0x45,0x3E], [0x00,0x42,0x7F,0x40,0x00],
+  [0x42,0x61,0x51,0x49,0x46], [0x21,0x41,0x45,0x4B,0x31],
+  [0x18,0x14,0x12,0x7F,0x10], [0x27,0x45,0x45,0x45,0x39],
+  [0x3C,0x4A,0x49,0x49,0x30], [0x01,0x71,0x09,0x05,0x03],
+  [0x36,0x49,0x49,0x49,0x36], [0x06,0x49,0x49,0x29,0x1E]
+];
+var F_LET = [
+  [0x7E,0x11,0x11,0x11,0x7E], [0x7F,0x49,0x49,0x49,0x36],
+  [0x3E,0x41,0x41,0x41,0x22], [0x7F,0x41,0x41,0x22,0x1C],
+  [0x7F,0x49,0x49,0x49,0x41], [0x7F,0x09,0x09,0x09,0x01],
+  [0x3E,0x41,0x49,0x49,0x7A], [0x7F,0x08,0x08,0x08,0x7F],
+  [0x00,0x41,0x7F,0x41,0x00], [0x20,0x40,0x41,0x3F,0x01],
+  [0x7F,0x08,0x14,0x22,0x41], [0x7F,0x40,0x40,0x40,0x40],
+  [0x7F,0x02,0x0C,0x02,0x7F], [0x7F,0x04,0x08,0x10,0x7F],
+  [0x3E,0x41,0x41,0x41,0x3E], [0x7F,0x09,0x09,0x09,0x06],
+  [0x3E,0x41,0x51,0x21,0x5E], [0x7F,0x09,0x19,0x29,0x46],
+  [0x46,0x49,0x49,0x49,0x31], [0x01,0x01,0x7F,0x01,0x01],
+  [0x3F,0x40,0x40,0x40,0x3F], [0x1F,0x20,0x40,0x20,0x1F],
+  [0x3F,0x40,0x38,0x40,0x3F], [0x63,0x14,0x08,0x14,0x63],
+  [0x07,0x08,0x70,0x08,0x07], [0x61,0x51,0x49,0x45,0x43]
+];
+var F_PUNCT = {
+  ':': [0x00,0x36,0x36,0x00,0x00],
+  '.': [0x00,0x60,0x60,0x00,0x00],
+  '/': [0x20,0x10,0x08,0x04,0x02],
+  '-': [0x08,0x08,0x08,0x08,0x08],
+  '+': [0x08,0x08,0x08,0x08,0x08],
+  ' ': [0x00,0x00,0x00,0x00,0x00],
+  '!': [0x00,0x00,0x5F,0x00,0x00],
+  '%': [0x62,0x64,0x08,0x13,0x23],
+  '_': [0x40,0x40,0x40,0x40,0x40],
+  '*': [0x14,0x08,0x3E,0x08,0x14]
+};
+var F_UNKNOWN = [0x00,0x00,0x5F,0x00,0x00];   // hud.h: 未知字符画一个竖条
+
+function glyphOf(ch) {
+  var c = ch.charCodeAt(0);
+  if (c >= 48 && c <= 57) return F_DIG[c - 48];
+  if (c >= 65 && c <= 90) return F_LET[c - 65];
+  if (c >= 97 && c <= 122) return F_LET[c - 97];
+  var p = F_PUNCT[ch];
+  return p ? p : F_UNKNOWN;
+}
+
+// 每个颜色一张 96 字形图集（字形格 6x8 像素，scale=1），drawImage 放大保证像素锐利
+var atlasCache = {};
+function getAtlas(col) {
+  var a = atlasCache[col];
+  if (a) return a;
+  a = document.createElement('canvas');
+  a.width = 96 * 6; a.height = 8;
+  var g = a.getContext('2d');
+  g.fillStyle = col;
+  for (var i = 0; i < 96; i++) {
+    var gl = glyphOf(String.fromCharCode(32 + i));
+    for (var cx = 0; cx < 6; cx++) {
+      var bits = (cx < 5) ? gl[cx] : 0;
+      for (var ry = 0; ry < 8; ry++) {
+        if ((bits >> ry) & 1) g.fillRect(i * 6 + cx, ry, 1, 1);
+      }
+    }
+  }
+  atlasCache[col] = a;
+  return a;
+}
+
+// 画字符串；sc = 点放大倍数（固件 HUD_S=2）。返回宽度（像素）。
+function text(ctx, str, x, y, col, sc) {
+  var a = getAtlas(col);
+  var cw = 6 * sc, chh = 8 * sc;
+  for (var i = 0; i < str.length; i++) {
+    var code = str.charCodeAt(i) - 32;
+    if (code < 0 || code > 95) code = 95;
+    ctx.drawImage(a, code * 6, 0, 6, 8, x + i * cw, y, cw, chh);
+  }
+  return str.length * cw;
+}
+function textW(str, sc) { return str.length * 6 * sc; }
+function textC(ctx, str, y, col, sc) {
+  return text(ctx, str, Math.round((CONFIG.W - textW(str, sc)) / 2), y, col, sc);
+}
+// 带小阴影的大标题（只在标题/暂停用，固件没有阴影；关掉也不影响布局）
+function textCShadow(ctx, str, y, col, sc, shadow) {
+  var x = Math.round((CONFIG.W - textW(str, sc)) / 2);
+  if (shadow) text(ctx, str, x + sc, y + sc, shadow, sc);
+  return text(ctx, str, x, y, col, sc);
+}
+function hex2(v) { var s = v.toString(16).toUpperCase(); return s.length < 2 ? '0' + s : s; }
+
+// ============================================================================
+// 4. 精灵：ASCII 像素图（与 tools/gen_assets.py 完全同一份美术 + 调色板）
+//    '.' 是透明色（固件里是色键 0xF81F）。
+// ============================================================================
+var PAL = {
+  '.': null,
+  'O': rgb565(24,20,48),   'q': rgb565(48,16,80),
+  'e': rgb565(80,8,20),    'K': rgb565(56,28,12),
+  'W': rgb565(245,255,255),'S': rgb565(200,210,230),
+  's': rgb565(110,120,150),
+  'L': rgb565(175,245,255),'C': rgb565(60,200,240),
+  'M': rgb565(90,255,200), 'g': rgb565(210,255,245),
+  'Y': rgb565(255,225,90), 'y': rgb565(255,250,200),
+  'o': rgb565(255,145,35), 'X': rgb565(255,205,120),
+  'p': rgb565(255,90,170), 'P': rgb565(255,200,230),
+  'R': rgb565(230,44,60),  'U': rgb565(255,120,110),
+  'V': rgb565(150,70,220), 'v': rgb565(215,160,255),
+  'D': rgb565(205,55,140), 'd': rgb565(245,140,200)
+};
+var PAL_CSS = {};
+for (var pk in PAL) { PAL_CSS[pk] = (PAL[pk] === null) ? null : c565(PAL[pk]); }
+
+// 左半 + 镜像 = 整张（同 gen_assets.py 的 mirror()）
+function mirrorRows(rows) {
+  var out = [];
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i], m = '', j;
+    for (j = r.length - 1; j >= 0; j--) m += r.charAt(j);
+    out.push(r + m);
+  }
+  return out;
+}
+
+var LEFT_A = ['..e.','..e.','.eUU','eURR','eRWR','eRRe','.eRR','..ee'];
+var LEFT_C = ['....','.qqq','qVVV','qWWv','qVVv','qVvq','.qqq','....'];
+var LEFT_BIG = [
+  '........','......qq','.....qDD','....qdDD','...qddDD','..qddDDD',
+  '.qDDDDDD','.qDDWWDD','.qDDWqDD','.qDDDDDD','.qDDDDqq','..qDDDDD',
+  '...qDDDD','....qDDD','.....qDD','......qq'
+];
+var LEFT_ELITE = [
+  '....Y..Y','....YY.Y','...YYYYY','...KKKKK','..KYoooo','.KYooooo',
+  '.KXooooo','.KoWWooo','.KoWRooo','.Koooooo','..Kooooo','..Kooooo',
+  '...Koooo','....Kooo','.....Koo','......KK'
+];
+
+var ART = {
+  gem: ['........','...MM...','..MggM..','.MgWWgM.','.MgWWgM.','..MggM..','...MM...','........'],
+  knife: ['........','...WW...','..WWWW..','..WWWW..','..SWWS..','.SSSSSS.','...ss...','...ss...'],
+  orb: ['........','..CCCC..','.CLLLLC.','.CLWWLC.','.CLWWLC.','.CLLLLC.','..CCCC..','........'],
+  A: mirrorRows(LEFT_A),
+  B: ['........','..C..C..','...CC...','.CCCCCC.','CCLWWLCC','CCLWWLCC','.CCCCCC.','...CC...'],
+  C: mirrorRows(LEFT_C),
+  BIG: mirrorRows(LEFT_BIG),
+  ELITE: mirrorRows(LEFT_ELITE)
+};
+
+function buildPixels(art, palCss) {
+  var h = art.length, w = art[0].length;
+  var cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  var g = cv.getContext('2d');
+  for (var y = 0; y < h; y++) {
+    for (var x = 0; x < w; x++) {
+      var c = palCss[art[y].charAt(x)];
+      if (!c) continue;
+      g.fillStyle = c;
+      g.fillRect(x, y, 1, 1);
+    }
+  }
+  return cv;
+}
+
+// 32x32 玩家：程序化拼（圆 + 矩形）。CONFIG.PLAYER_ART 给了 ASCII 就用 ASCII。
+function discRect(g, cx, cy, r, col) {
+  g.fillStyle = col;
+  var rr = r * r + r * 0.4;
+  for (var y = -r; y <= r; y++) {
+    for (var x = -r; x <= r; x++) {
+      if (x * x + y * y <= rr) g.fillRect(cx + x, cy + y, 1, 1);
+    }
+  }
+}
+
+function buildPlayer32(hurt) {
+  // 俯视角小人：披风 + 躯干 + 肩甲 + 头盔 + 举起的刀。全部整数像素，保证锐利。
+  var cv = document.createElement('canvas');
+  cv.width = CONFIG.P_SIZE; cv.height = CONFIG.P_SIZE;
+  var g = cv.getContext('2d');
+  var OUT  = hurt ? c565(rgb565(72,10,20))   : PAL_CSS['O'];
+  var BODY = hurt ? c565(rgb565(232,44,56))  : PAL_CSS['C'];
+  var DARK = hurt ? c565(rgb565(150,20,30))  : c565(rgb565(30,120,160));
+  var LITE = hurt ? c565(rgb565(255,140,130)): PAL_CSS['L'];
+  var HEAD = hurt ? c565(rgb565(255,190,190)): PAL_CSS['S'];
+  var HI   = PAL_CSS['W'];
+  g.fillStyle = 'rgba(0,0,0,0.28)';                       // 影子
+  g.fillRect(7, 29, 18, 3);
+  g.fillStyle = OUT;  g.fillRect(5, 16, 22, 15);          // 披风
+  g.fillStyle = DARK; g.fillRect(7, 18, 18, 12);
+  g.fillStyle = OUT;  g.fillRect(9, 13, 14, 17);          // 躯干
+  g.fillStyle = BODY; g.fillRect(11, 14, 10, 15);
+  g.fillStyle = LITE; g.fillRect(12, 15, 3, 11);
+  discRect(g, 8, 18, 4, OUT);  discRect(g, 8, 18, 2, LITE);   // 肩甲
+  discRect(g, 24, 18, 4, OUT); discRect(g, 24, 18, 2, LITE);
+  discRect(g, 16, 12, 7, OUT);                            // 头盔
+  discRect(g, 16, 12, 5, HEAD);
+  g.fillStyle = HI; g.fillRect(13, 9, 3, 2);              // 高光
+  g.fillStyle = c565(rgb565(140,150,170)); g.fillRect(15, 15, 3, 1);   // 面窗
+  g.fillStyle = OUT; g.fillRect(14, 0, 5, 11);            // 刀
+  g.fillStyle = HI;  g.fillRect(15, 1, 2, 7);
+  g.fillStyle = PAL_CSS['S']; g.fillRect(17, 1, 1, 7);
+  g.fillStyle = PAL_CSS['Y']; g.fillRect(14, 8, 5, 3);    // 护手
+  g.fillStyle = OUT; g.fillRect(15, 11, 3, 2);
+  return cv;
+}
+
+// ============================================================================
+// 4b. 内嵌素材：来自 tools/assets.json（assets 队友的最终像素图），单文件内联。
+//     调色板是索引色（每个像素一个十六进制数字，. 表示色键透明）。
+//     CONFIG.USE_ASSET_SRC = false 可退回下面内置的 ASCII 美术。
+// ============================================================================
+var ASSET_SRC = {
+  palette: ["#14101f","#2b2440","#5b5478","#9b95b8","#ffffff","#aef4ff","#3cc8f0","#5affc8","#b9ffe4","#ffdf4a","#ff9a20","#ff5aa0","#ffc0e0","#e32c40","#8a6bd0","#c9a6ff"],
+  sprites: {
+    "A8_GEM": "...........77.....7887...784487..784487...7887.....77...........",
+    "A8_KNIFE": "...........44.....4444....4444....3443...333333....22......22...",
+    "A8_ORB": "..........6666...655556..654456..654456..655556...6666..........",
+    "A8_ENEMY_A": "..0..0....0..0...0cccc0.0cddddc00d4dd4d00dd00dd0.0dddd0...0000..",
+    "A8_ENEMY_B": "..........6..6.....66....666666.6654456666544566.666666....66...",
+    "A8_ENEMY_C": ".........000000.0eeeeee0044ff4400eeffee00ef00fe0.000000.........",
+    "A16_ENEMY_BIG": "......................0000...........0bbbb0.........0cbbbbc0.......0ccbbbbcc0.....0ccbbbbbbcc0...0bbbbbbbbbbbb0..0bb44bbbb44bb0..0bb40bbbb04bb0..0bbbbbbbbbbbb0..0bbbb0000bbbb0...0bbbbbbbbbb0.....0bbbbbbbb0.......0bbbbbb0.........0bbbb0...........0000......",
+    "A16_ENEMY_ELITE": "....9..99..9........99.99.99.......9999999999......0000000000.....09aaaaaaaa90...09aaaaaaaaaa90..09aaaaaaaaaa90..0a44aaaaaa44a0..0a4daaaaaad4a0..0aaaaaaaaaaaa0...0aaaaaaaaaa0....0aaaaaaaaaa0.....0aaaaaaaa0.......0aaaaaa0.........0aaaa0...........0000......",
+    "A32_PLAYER": "...............44.............................2442............................2442............................2442............................2442............................2442............................2442...........................224422........................0999999990..........................22..............................22...........................06699660.......................0566666650.....................066444444660....................066444444660....................066666666660....................066666666660....................066666666660....................066666666660....................000000000000................05560666666666606550............05560666666666606550............05560666666666606550.............056666666666666650...............0566666666666650.................06666666666660..................06666666666660...................066666666660....................066666666660....................066699996660.....................0666..6660......................0666..6660...........",
+    "A32_PLAYER_HURT": "...............44.............................d44d............................d44d............................d44d............................d44d............................d44d............................d44d...........................dd44dd........................0999999990..........................dd..............................dd...........................0dd99dd0.......................0cddddddc0.....................0dd444444dd0....................0dd444444dd0....................0dddddddddd0....................0dddddddddd0....................0dddddddddd0....................0dddddddddd0....................000000000000................0ccd0dddddddddd0dcc0............0ccd0dddddddddd0dcc0............0ccd0dddddddddd0dcc0.............0cddddddddddddddc0...............0cddddddddddddc0.................0dddddddddddd0..................0dddddddddddd0...................0dddddddddd0....................0dddddddddd0....................0ddd9999ddd0.....................0ddd..ddd0......................0ddd..ddd0..........."
+  }
+};
+var SPR = {};
+
+// 从内嵌 assets.json 数据建一张精灵（索引色 -> 画布）
+function buildFromAsset(id) {
+  var px = ASSET_SRC.sprites[id];
+  if (!px) return null;
+  var size = Math.round(Math.sqrt(px.length));
+  var cv = document.createElement('canvas');
+  cv.width = size; cv.height = size;
+  var g = cv.getContext('2d');
+  for (var y = 0; y < size; y++) {
+    for (var x = 0; x < size; x++) {
+      var ch = px.charAt(y * size + x);
+      if (ch === '.') continue;
+      var c = ASSET_SRC.palette[parseInt(ch, 16)];
+      if (!c) continue;
+      g.fillStyle = c;
+      g.fillRect(x, y, 1, 1);
+    }
+  }
+  return cv;
+}
+
+function buildSprites() {
+  var map = { gem: 'A8_GEM', knife: 'A8_KNIFE', orb: 'A8_ORB',
+              A: 'A8_ENEMY_A', B: 'A8_ENEMY_B', C: 'A8_ENEMY_C',
+              BIG: 'A16_ENEMY_BIG', ELITE: 'A16_ENEMY_ELITE',
+              player: 'A32_PLAYER', playerHurt: 'A32_PLAYER_HURT' };
+  var k, cv;
+  if (CONFIG.USE_ASSET_SRC && typeof ASSET_SRC !== 'undefined' && ASSET_SRC) {
+    for (k in map) {
+      cv = buildFromAsset(map[k]);
+      if (cv) SPR[k] = cv;
+    }
+  }
+  // 缺什么就用内置 ASCII / 程序化图形兜底（assets.json 没给全时也能跑）
+  if (!SPR.gem)    SPR.gem = buildPixels(ART.gem, PAL_CSS);
+  if (!SPR.knife)  SPR.knife = buildPixels(ART.knife, PAL_CSS);
+  if (!SPR.orb)    SPR.orb = buildPixels(ART.orb, PAL_CSS);
+  if (!SPR.A)      SPR.A = buildPixels(ART.A, PAL_CSS);
+  if (!SPR.B)      SPR.B = buildPixels(ART.B, PAL_CSS);
+  if (!SPR.C)      SPR.C = buildPixels(ART.C, PAL_CSS);
+  if (!SPR.BIG)    SPR.BIG = buildPixels(ART.BIG, PAL_CSS);
+  if (!SPR.ELITE)  SPR.ELITE = buildPixels(ART.ELITE, PAL_CSS);
+  if (!SPR.player) SPR.player = buildPlayer32(false);
+  if (!SPR.playerHurt) SPR.playerHurt = buildPlayer32(true);
+}
+
+
+// ============================================================================
+// 5. 对象池 + 全局状态（字段名尽量对应 game.h 的全局变量，方便对照）
+// ============================================================================
+function newSlot() {
+  return { x: 0, y: 0, vx: 0, vy: 0, alive: 0, kind: '', hp: 0, t: 0,
+           accx: 0, accy: 0, size: 8, v16: 0 };
+}
+
+var E8 = [], E16 = [], KN = [], GEM = [], PA = [];
+
+function initPools() {
+  var i;
+  E8 = []; E16 = []; KN = []; GEM = []; PA = [];
+  for (i = 0; i < CONFIG.E8_MAX; i++)  E8.push(newSlot());
+  for (i = 0; i < CONFIG.E16_MAX; i++) E16.push(newSlot());
+  for (i = 0; i < CONFIG.KN_MAX; i++)  KN.push(newSlot());
+  for (i = 0; i < CONFIG.GEM_MAX; i++) GEM.push(newSlot());
+  for (i = 0; i < CONFIG.PA_MAX; i++)  PA.push(newSlot());
+}
+
+var G = {
+  state: 'TITLE',
+  tick: 0, life: 100, fireLv: 1,
+  px: 944, py: 524, inv: 0,
+  kill: 0, level: 1, exp: 0, expNeed: 5,
+  sec: 0, diff: 0, best: 0,
+  fireCd: 0, orbN: 0, orbAng: 0,
+  knDmg: 3, knN: 1, knInt: 18, pmove: 8, magnet: 70,
+  eliteCd: 45 * 60, overCd: 0,
+  opt: [0, 0, 0, 0], optSel: 0, upgLv: [0, 0, 0, 0, 0, 0, 0],
+  banner: 0, bannerTxt: '',
+  flash: 0,              // 拾取/升级的中央提示剩余帧
+  curDir: 0, hurtFlash: 0
+};
+
+// 每帧统计（F1 调试面板用）
+var STAT = { knifeHitTests: 0, orbHitTests: 0, playerHitTests: 0, draws: 0,
+             enemyMoves: 0, frameMs: 0, steps: 0 };
+
+var UP_NAME = ['FIRE RATE', 'MULTI KNIFE', 'KNIFE POWER', 'ORB +1',
+               'MOVE SPEED', 'HEAL 15', 'MAGNET'];
+var UP_DESC = ['INTERVAL -3F', 'ONE MORE KNIFE', 'DAMAGE +2', 'ORBIT +1 BALL',
+               'SPEED +1 PX/F', 'RESTORE 15 HP', 'GEM PULL +20'];
+
+// ---------------------------------------------------------------- 存档
+function loadBest() {
+  try {
+    var v = window.localStorage.getItem(CONFIG.BEST_KEY);
+    if (v) G.best = parseInt(v, 10) || 0;
+  } catch (e) { G.best = 0; }
+}
+function saveBest() {
+  try { window.localStorage.setItem(CONFIG.BEST_KEY, String(G.best)); } catch (e) {}
+}
+
+// ---------------------------------------------------------------- 重置
+function reset() {
+  var i;
+  G.tick = 0; seedRng(CONFIG.SEED);
+  G.life = CONFIG.P_HP; G.fireLv = 1;
+  G.px = (CONFIG.P_START_X >= 0) ? CONFIG.P_START_X
+        : Math.floor((CONFIG.W - CONFIG.P_SIZE) / 2);
+  G.py = (CONFIG.P_START_Y >= 0) ? CONFIG.P_START_Y
+        : Math.floor((CONFIG.H - CONFIG.P_SIZE) / 2);
+  G.px = G.px & ~1; G.py = G.py & ~1;
+  G.inv = 0; G.kill = 0; G.level = 1; G.exp = 0; G.expNeed = CONFIG.EXP_BASE;
+  G.sec = 0; G.diff = 0; G.fireCd = 0; G.orbN = 0; G.orbAng = 0;
+  G.knDmg = CONFIG.KN_DMG; G.knN = 1; G.knInt = CONFIG.KN_INT;
+  G.pmove = CONFIG.P_SPEED; G.magnet = CONFIG.MAGNET;
+  G.eliteCd = CONFIG.ELITE_FIRST * 60;
+  G.overCd = 0; G.optSel = 0;
+  G.banner = 0; G.bannerTxt = ''; G.flash = 0; G.hurtFlash = 0;
+  G.curDir = 0;
+  for (i = 0; i < 7; i++) G.upgLv[i] = 0;
+  for (i = 0; i < E8.length; i++)  E8[i].alive = 0;
+  for (i = 0; i < E16.length; i++) E16[i].alive = 0;
+  for (i = 0; i < KN.length; i++)  KN[i].alive = 0;
+  for (i = 0; i < GEM.length; i++) GEM[i].alive = 0;
+  for (i = 0; i < PA.length; i++)  PA[i].alive = 0;
+}
+
+// ============================================================================
+// 6. 输入
+// ============================================================================
+var keys = {};            // 按住状态
+var pressed = [];         // 本逻辑帧内按下的键（一次性），logic step 消费
+var dbgOn = false, helpOn = false, paused0 = false;
+var aiDirOverride = -1;   // >= 0 时忽略键盘（AI 自动驾驶 / 模拟用）
+
+function readDir() {
+  if (aiDirOverride >= 0) return aiDirOverride;
+  var d = 0;
+  if (keys['ArrowUp'] || keys['KeyW']) d |= 1;
+  if (keys['ArrowRight'] || keys['KeyD']) d |= 2;
+  if (keys['ArrowDown'] || keys['KeyS']) d |= 4;
+  if (keys['ArrowLeft'] || keys['KeyA']) d |= 8;
+  return d;
+}
+
+// 把按键翻译成固件 ginput 里的"一次事件"
+function anyPressed(list) {
+  for (var i = 0; i < pressed.length; i++) {
+    for (var j = 0; j < list.length; j++) if (pressed[i] === list[j]) return true;
+  }
+  return false;
+}
+
+function handleEdges() {
+  // F1 / H / R / 倍速 之类的全局键在 keydown 里直接处理，这里只管游戏状态机
+  var startKeys = ['KeyG', 'Enter', 'NumpadEnter'];
+  var pauseKeys = ['KeyP'];
+  var exitKeys = ['KeyQ', 'Escape'];
+
+  if (G.state === 'UPGRADE') {
+    if (anyPressed(['ArrowLeft', 'KeyA']))  G.optSel = (G.optSel + 3) % 4;
+    if (anyPressed(['ArrowRight', 'KeyD'])) G.optSel = (G.optSel + 1) % 4;
+    if (anyPressed(['ArrowUp', 'KeyW', 'KeyZ', 'Space', 'Enter', 'NumpadEnter'])) {
+      applyUpgrade(G.opt[G.optSel]);
+      G.state = 'PLAY';
+      G.inv = 30;
+      G.flash = 30;
+      G.bannerTxt = UP_NAME[G.opt[G.optSel]] + ' OK';
+      G.banner = 90;
+    }
+    return;
+  }
+  if (anyPressed(startKeys)) {
+    if (G.state === 'TITLE' || G.state === 'OVER') {
+      reset(); G.state = 'PLAY'; G.inv = 30;
+      return;
+    }
+  }
+  if (anyPressed(pauseKeys)) {
+    if (G.state === 'PLAY') G.state = 'PAUSE';
+    else if (G.state === 'PAUSE') G.state = 'PLAY';
+  }
+  if (anyPressed(exitKeys)) {
+    if (G.state !== 'TITLE') { reset(); G.state = 'TITLE'; }
+  }
+}
+
+// ============================================================================
+// 7. 刷怪
+// ============================================================================
+function spawnEnemy(kind) {
+  var def = CONFIG.ENEMY[kind];
+  var size = def.size;
+  var r = rnd(4), x, y;
+  var w = CONFIG.X_HI - CONFIG.X_LO, h = CONFIG.Y_HI - CONFIG.Y_LO;
+  if (r === 0) {                                  // 上
+    x = CONFIG.X_LO - 8 + rnd(w - 32);
+    y = CONFIG.Y_LO - 8 - rnd(40);
+  } else if (r === 1) {                           // 下
+    x = CONFIG.X_LO - 8 + rnd(w - 32);
+    y = CONFIG.Y_HI - 8 + rnd(40);
+  } else if (r === 2) {                           // 左
+    x = CONFIG.X_LO - 8 - rnd(40);
+    y = CONFIG.Y_LO - 8 + rnd(h - 32);
+  } else {                                        // 右
+    x = CONFIG.X_HI - 8 + rnd(40);
+    y = CONFIG.Y_LO - 8 + rnd(h - 32);
+  }
+  var pool = (size === 16) ? E16 : E8;
+  for (var i = 0; i < pool.length; i++) {
+    if (pool[i].alive) continue;
+    var e = pool[i];
+    e.alive = 1; e.kind = kind; e.size = size;
+    e.x = x & ~1; e.y = y & ~1;
+    e.hp = def.hp;
+    e.v16 = def.v16 + G.diff * def.vdiff;
+    e.t = 0;
+    e.accx = rnd(16); e.accy = rnd(16);   // 错开亚像素相位，避免整批同步移动
+    return true;
+  }
+  return false;
+}
+
+function pickKind() {
+  var r = rnd(100);
+  if (G.sec >= CONFIG.BIG_SEC && r < CONFIG.BIG_PCT) return 'BIG';
+  if (G.sec >= CONFIG.C_SEC && r < 20) return 'C';
+  if (r < 50) return 'A';
+  return 'B';
+}
+
+function spawnBatch() {
+  var n = CONFIG.SPAWN_BASE + G.diff;
+  if (n > CONFIG.SPAWN_MAX) n = CONFIG.SPAWN_MAX;
+  for (var i = 0; i < n; i++) spawnEnemy(pickKind());
+}
+
+// ============================================================================
+// 8. 飞刀 / 环绕球
+// ============================================================================
+var D8X = [16, 11, 0, -11, -16, -11, 0, 11];
+var D8Y = [0, 11, 16, 11, 0, -11, -16, -11];
+var OCX = [44, 41, 31, 17, 0, -17, -31, -41, -44, -41, -31, -17, 0, 17, 31, 41];
+var OCY = [0, 17, 31, 41, 44, 41, 31, 17, 0, -17, -31, -41, -44, -41, -31, -17];
+
+function fireKnives(cx, cy) {
+  // 找最近敌人（曼哈顿距离，同 game.h）
+  var best = null, bd = 1e18, i, e, dx, dy, d;
+  for (i = 0; i < E8.length; i++) {
+    e = E8[i]; if (!e.alive) continue;
+    dx = e.x + 4 - cx; dy = e.y + 4 - cy;
+    d = Math.abs(dx) + Math.abs(dy);
+    if (d < bd) { bd = d; best = e; }
+  }
+  for (i = 0; i < E16.length; i++) {
+    e = E16[i]; if (!e.alive) continue;
+    dx = e.x + 8 - cx; dy = e.y + 8 - cy;
+    d = Math.abs(dx) + Math.abs(dy);
+    if (d < bd) { bd = d; best = e; }
+  }
+  if (!best) return;
+  var hs = (best.size === 16) ? 8 : 4;
+  dx = best.x + hs - cx; dy = best.y + hs - cy;
+  var ax = Math.abs(dx), ay = Math.abs(dy), dir;
+  if (ax * 2 < ay)      dir = (dy >= 0) ? 2 : 6;
+  else if (ay * 2 < ax) dir = (dx >= 0) ? 0 : 4;
+  else if (dx >= 0 && dy >= 0) dir = 1;
+  else if (dx < 0 && dy >= 0)  dir = 3;
+  else if (dx < 0 && dy < 0)   dir = 5;
+  else                          dir = 7;
+
+  var kx = (cx - 4) & ~1, ky = (cy - 4) & ~1;
+
+  for (var k = 0; k < G.knN; k++) {
+    var d2 = (G.knN === 1) ? dir
+           : (G.knN === 2 ? ((dir + (k === 0 ? 7 : 1)) & 7)
+                          : ((dir + (k === 0 ? 7 : (k === 1 ? 0 : 1))) & 7));
+    for (i = 0; i < KN.length; i++) {
+      if (KN[i].alive) continue;
+      var f = KN[i];
+      f.alive = 1; f.x = kx; f.y = ky;
+      f.vx = (D8X[d2] * CONFIG.KN_SPEED) >> 4;
+      f.vy = (D8Y[d2] * CONFIG.KN_SPEED) >> 4;
+      break;
+    }
+  }
+}
+
+function hurtEnemy8(e, dmg) {
+  if (e.hp > dmg) { e.hp -= dmg; return; }
+  e.alive = 0; G.kill++;
+  sparkBurst(e.x, e.y, CONFIG.PA_N8);
+  if (rnd(100) < CONFIG.GEM_DROP_PCT) dropGem(e.x, e.y);
+}
+
+function hurtEnemy16(e, dmg) {
+  if (e.hp > dmg) { e.hp -= dmg; return; }
+  e.alive = 0; G.kill++;
+  sparkBurst(e.x, e.y, CONFIG.PA_N16);
+  dropGem(e.x, e.y);                       // game.h: 16x16 必掉
+}
+
+function updateKnives() {
+  var K = CONFIG.KN_SUBSTEPS < 1 ? 1 : CONFIG.KN_SUBSTEPS;
+  for (var i = 0; i < KN.length; i++) {
+    var k = KN[i];
+    if (!k.alive) continue;
+    var x0 = k.x, y0 = k.y;
+    for (var s = 1; s <= K && k.alive; s++) {
+      k.x = x0 + Math.round(k.vx * s / K);
+      k.y = y0 + Math.round(k.vy * s / K);
+      if (k.x < CONFIG.X_LO || k.x > CONFIG.X_HI - 8 ||
+          k.y < CONFIG.Y_LO || k.y > CONFIG.Y_HI - 8) { k.alive = 0; break; }
+      var j, e;
+      for (j = 0; j < E8.length; j++) {
+        e = E8[j]; if (!e.alive) continue;
+        STAT.knifeHitTests++;
+        if (Math.abs(e.x - k.x) > 8 || Math.abs(e.y - k.y) > 8) continue;
+        hurtEnemy8(e, G.knDmg);
+        k.alive = 0;
+        break;
+      }
+      if (!k.alive) break;
+      for (j = 0; j < E16.length; j++) {
+        e = E16[j]; if (!e.alive) continue;
+        STAT.knifeHitTests++;
+        if (Math.abs(e.x + 8 - k.x - 4) > 10 || Math.abs(e.y + 8 - k.y - 4) > 10) continue;
+        hurtEnemy16(e, G.knDmg);
+        k.alive = 0;
+        break;
+      }
+    }
+  }
+}
+
+function updateOrbs(cx, cy) {
+  G.orbAng = (G.orbAng + 1) & 15;
+  var slotAng = Math.floor(16 / G.orbN);
+  for (var o = 0; o < G.orbN; o++) {
+    var ang = (G.orbAng + o * slotAng) & 15;
+    var ox = cx + OCX[ang] - 4, oy = cy + OCY[ang] - 4;
+    var j, e;
+    for (j = 0; j < E8.length; j++) {
+      e = E8[j]; if (!e.alive) continue;
+      STAT.orbHitTests++;
+      if (Math.abs(e.x - ox) > 10 || Math.abs(e.y - oy) > 10) continue;
+      if (e.t > 0) continue;
+      hurtEnemy8(e, CONFIG.ORB_DMG);
+      e.t = CONFIG.ORB_COOL;
+    }
+    // 固件 game.h 的环绕球只判定 8x8 池；原型把 16x16 也加上，否则球打不到精英
+    for (j = 0; j < E16.length; j++) {
+      e = E16[j]; if (!e.alive) continue;
+      STAT.orbHitTests++;
+      if (Math.abs(e.x + 8 - ox - 4) > 12 || Math.abs(e.y + 8 - oy - 4) > 12) continue;
+      if (e.t > 0) continue;
+      hurtEnemy16(e, CONFIG.ORB_DMG);
+      e.t = CONFIG.ORB_COOL;
+    }
+  }
+}
+
+
+// ============================================================================
+// 9. 特效 / 宝石
+// ============================================================================
+function sparkBurst(x, y, n) {
+  for (var q = 0; q < n; q++) {
+    for (var i = 0; i < PA.length; i++) {
+      if (PA[i].alive) continue;
+      var p = PA[i];
+      p.alive = 1;
+      p.kind = rnd(2);
+      p.x = x & ~1; p.y = y & ~1;
+      p.vx = rnd(CONFIG.PA_VMAX * 2 + 1) - CONFIG.PA_VMAX;
+      p.vy = rnd(CONFIG.PA_VMAX * 2 + 1) - CONFIG.PA_VMAX;
+      p.t = CONFIG.PA_LIFE_MIN + rnd(CONFIG.PA_LIFE_MAX - CONFIG.PA_LIFE_MIN + 1);
+      break;
+    }
+  }
+}
+
+function dropGem(x, y) {
+  for (var i = 0; i < GEM.length; i++) {
+    if (GEM[i].alive) continue;
+    var g = GEM[i];
+    g.alive = 1; g.x = x & ~1; g.y = y & ~1;
+    return true;
+  }
+  return false;
+}
+
+function updateParticles() {
+  for (var i = 0; i < PA.length; i++) {
+    var p = PA[i];
+    if (!p.alive) continue;
+    p.x += Math.trunc(p.vx / 2);       // 固件是 C 整数除法（向零取整）
+    p.y += Math.trunc(p.vy / 2);
+    if (p.t > 0) p.t--;
+    if (p.t <= 0) p.alive = 0;
+  }
+}
+
+function updateGems(cx, cy) {
+  for (var i = 0; i < GEM.length; i++) {
+    var g = GEM[i];
+    if (!g.alive) continue;
+    var dx = cx - (g.x + 4), dy = cy - (g.y + 4);
+    var ax = Math.abs(dx), ay = Math.abs(dy);
+    if ((ax + ay) < G.magnet) {
+      var sp = (ax + ay) > 100 ? Math.round(CONFIG.GEM_PULL * 1.6) : CONFIG.GEM_PULL;
+      if (ax > 1) g.x += (dx > 0 ? sp : -sp);
+      if (ay > 1) g.y += (dy > 0 ? sp : -sp);
+    }
+    if (ax < CONFIG.PICK_R && ay < CONFIG.PICK_R) {
+      g.alive = 0;
+      G.exp++;
+      if (G.exp >= G.expNeed) {
+        G.exp -= G.expNeed;
+        G.level++;
+        G.fireLv = G.level;
+        G.expNeed = CONFIG.EXP_BASE + G.level * CONFIG.EXP_LV;
+        openUpgrade();
+        return;
+      }
+    }
+  }
+}
+
+// ============================================================================
+// 10. 升级（7 类随机抽 4 个）
+// ============================================================================
+function openUpgrade() {
+  var pool = [0, 1, 2, 3, 4, 5, 6], i, j, t;
+  for (i = 0; i < 7; i++) {
+    j = i + rnd(7 - i);
+    t = pool[i]; pool[i] = pool[j]; pool[j] = t;
+  }
+  G.opt[0] = pool[0]; G.opt[1] = pool[1]; G.opt[2] = pool[2]; G.opt[3] = pool[3];
+  G.optSel = 0;
+  G.state = 'UPGRADE';
+}
+
+function upgPreview(id) {
+  switch (id) {
+    case 0: return G.knInt > CONFIG.KN_MIN_INT
+      ? (G.knInt + ' > ' + Math.max(CONFIG.KN_MIN_INT, G.knInt - CONFIG.KN_INT_STEP)) : 'MAX';
+    case 1: return G.knN < CONFIG.KN_N_MAX ? (G.knN + ' > ' + (G.knN + 1)) : 'MAX';
+    case 2: return G.knDmg + ' > ' + (G.knDmg + CONFIG.KN_DMG_STEP);
+    case 3: return G.orbN < CONFIG.ORB_MAX ? (G.orbN + ' > ' + (G.orbN + 1)) : 'MAX';
+    case 4: return G.pmove < 12 ? (G.pmove + ' > ' + (G.pmove + 1)) : 'MAX';
+    case 5: return 'HP ' + G.life + ' > ' + Math.min(CONFIG.P_HP, G.life + 15);
+    case 6: return G.magnet < CONFIG.MAGNET_MAX
+      ? (G.magnet + ' > ' + (G.magnet + CONFIG.MAGNET_STEP)) : 'MAX';
+  }
+  return '';
+}
+
+function applyUpgrade(t) {
+  switch (t) {
+    case 0: if (G.knInt > CONFIG.KN_MIN_INT) G.knInt -= CONFIG.KN_INT_STEP; break;
+    case 1: if (G.knN < CONFIG.KN_N_MAX) G.knN++; break;
+    case 2: G.knDmg += CONFIG.KN_DMG_STEP; break;
+    case 3: if (G.orbN < CONFIG.ORB_MAX) G.orbN++; break;
+    case 4: if (G.pmove < 12) G.pmove++; break;
+    case 5: G.life = (G.life < 85) ? (G.life + 15) : CONFIG.P_HP; break;
+    case 6: if (G.magnet < CONFIG.MAGNET_MAX) G.magnet += CONFIG.MAGNET_STEP; break;
+  }
+  if (G.upgLv[t] < 99) G.upgLv[t]++;
+}
+
+
+// ============================================================================
+// 11. 物理 / 每帧逻辑（对应 game.h game_physics）
+// ============================================================================
+function playerHit(dmg) {
+  if (G.inv > 0) return;
+  if (G.life > dmg) {
+    G.life -= dmg;
+    G.inv = CONFIG.P_INV;
+    G.hurtFlash = 10;
+  } else {
+    G.life = 0;
+    G.state = 'OVER';
+    G.overCd = CONFIG.OVER_FRAMES;
+    if (G.sec > G.best) { G.best = G.sec; saveBest(); }
+  }
+}
+
+// 敌人在 1/16 像素域累加，逐轴取整（固件的 (sx*step)>>4 在对角时会恒为 0）
+function moveEnemy(e, half, cx, cy) {
+  var dx = cx - (e.x + half), dy = cy - (e.y + half);
+  var sx = dx > 0 ? 1 : (dx < 0 ? -1 : 0);
+  var sy = dy > 0 ? 1 : (dy < 0 ? -1 : 0);
+  var rx = 0, ry = 0;
+  if (sx !== 0 && sy !== 0) { rx = (e.v16 * 11) >> 4; ry = rx; }   // 对角 11/16 每轴
+  else if (sx !== 0) { rx = e.v16; }
+  else if (sy !== 0) { ry = e.v16; }
+  e.accx += rx; var stepx = e.accx >> 4; e.accx &= 15;
+  e.accy += ry; var stepy = e.accy >> 4; e.accy &= 15;
+  e.x += sx * stepx;
+  e.y += sy * stepy;
+  if (e.t > 0) e.t--;
+}
+
+function updateEnemies(cx, cy) {
+  var i, e, ddx, ddy;
+  for (i = 0; i < E8.length; i++) {
+    e = E8[i];
+    if (!e.alive) continue;
+    moveEnemy(e, 4, cx, cy);
+    STAT.enemyMoves++;
+    STAT.playerHitTests++;
+    ddx = cx - (e.x + 4); ddy = cy - (e.y + 4);
+    if (ddx > -CONFIG.CONTACT8 && ddx < CONFIG.CONTACT8 &&
+        ddy > -CONFIG.CONTACT8 && ddy < CONFIG.CONTACT8) {
+      playerHit(CONFIG.ENEMY[e.kind].dmg);
+      if (G.state !== 'PLAY') return;
+    }
+  }
+  for (i = 0; i < E16.length; i++) {
+    e = E16[i];
+    if (!e.alive) continue;
+    moveEnemy(e, 8, cx, cy);
+    STAT.enemyMoves++;
+    STAT.playerHitTests++;
+    ddx = cx - (e.x + 8); ddy = cy - (e.y + 8);
+    if (ddx > -CONFIG.CONTACT16 && ddx < CONFIG.CONTACT16 &&
+        ddy > -CONFIG.CONTACT16 && ddy < CONFIG.CONTACT16) {
+      playerHit(CONFIG.ENEMY[e.kind].dmg);
+      if (G.state !== 'PLAY') return;
+    }
+  }
+}
+
+// 简单网格排斥：同格/邻格的敌人若靠得太近就互推（需求 6 的"轻微互相分离"）
+function separate() {
+  if (!CONFIG.SEPARATE) return;
+  var cell = CONFIG.SEP_CELL, R = CONFIG.SEP_R, P = CONFIG.SEP_PUSH;
+  var map = new Map();
+  var i, e, k, gx, gy, a, j, o, dx, dy, ox2, oy2;
+  for (i = 0; i < E8.length; i++) {
+    e = E8[i];
+    if (!e.alive) continue;
+    gx = Math.floor(e.x / cell); gy = Math.floor(e.y / cell);
+    k = gx + ':' + gy;
+    a = map.get(k);
+    if (!a) { a = []; map.set(k, a); }
+    a.push(e);
+  }
+  for (i = 0; i < E8.length; i++) {
+    e = E8[i];
+    if (!e.alive) continue;
+    gx = Math.floor(e.x / cell); gy = Math.floor(e.y / cell);
+    for (ox2 = -1; ox2 <= 1; ox2++) {
+      for (oy2 = -1; oy2 <= 1; oy2++) {
+        a = map.get((gx + ox2) + ':' + (gy + oy2));
+        if (!a) continue;
+        for (j = 0; j < a.length; j++) {
+          o = a[j];
+          if (o === e) continue;
+          dx = e.x - o.x; dy = e.y - o.y;
+          if (dx > -R && dx < R && dy > -R && dy < R) {
+            e.x += (dx > 0) ? P : (dx < 0 ? -P : 0);
+            e.y += (dy > 0) ? P : (dy < 0 ? -P : 0);
+          }
+        }
+      }
+    }
+  }
+}
+
+function physics() {
+  G.tick++;
+  G.sec = Math.floor(G.tick / 60);
+  G.diff = Math.floor(G.sec / CONFIG.DIFF_EVERY);
+
+  // ---- 玩家移动：8 方向，对角 3/4
+  var dir = readDir();
+  G.curDir = dir;
+  var mv = G.pmove, mvx = 0, mvy = 0;
+  if (dir & 1) mvy -= mv;
+  if (dir & 4) mvy += mv;
+  if (dir & 8) mvx -= mv;
+  if (dir & 2) mvx += mv;
+  if (mvx !== 0 && mvy !== 0) {
+    mvx = idiv(mvx * CONFIG.DIAG_N, CONFIG.DIAG_D);
+    mvy = idiv(mvy * CONFIG.DIAG_N, CONFIG.DIAG_D);
+  }
+  G.px = clamp(G.px + mvx, CONFIG.X_LO, CONFIG.X_HI - CONFIG.P_SIZE);
+  G.py = clamp(G.py + mvy, CONFIG.Y_LO, CONFIG.Y_HI - CONFIG.P_SIZE);
+  var cx = G.px + 16, cy = G.py + 16;
+  if (G.inv > 0) G.inv--;
+
+  STAT.knifeHitTests = 0; STAT.orbHitTests = 0;
+  STAT.playerHitTests = 0; STAT.enemyMoves = 0;
+
+  // ---- 刷怪（game.h: 每 20 帧一批；精英每 45 秒）
+  if ((G.tick % CONFIG.SPAWN_EVERY) === 0) spawnBatch();
+  if (G.tick >= G.eliteCd) { spawnEnemy('ELITE'); G.eliteCd += CONFIG.ELITE_EVERY * 60; }
+
+  // ---- 飞刀
+  if (G.fireCd <= 0) { fireKnives(cx, cy); G.fireCd = G.knInt; }
+  G.fireCd--;
+  updateKnives();
+
+  // ---- 环绕球
+  if (G.orbN > 0) updateOrbs(cx, cy);
+
+  // ---- 敌人
+  updateEnemies(cx, cy);
+  separate();
+  if (G.state !== 'PLAY') return;
+
+  // ---- 宝石 / 经验
+  updateGems(cx, cy);
+  if (G.state !== 'PLAY') return;
+
+  // ---- 粒子 / 计时器
+  updateParticles();
+  if (G.banner > 0) G.banner--;
+  if (G.flash > 0) G.flash--;
+  if (G.hurtFlash > 0) G.hurtFlash--;
+}
+
+// ============================================================================
+// 12. 主状态机（每逻辑帧一次）
+// ============================================================================
+function step() {
+  handleEdges();
+  if (G.state === 'PLAY') {
+    physics();
+  } else if (G.state === 'OVER') {
+    if (G.overCd > 0) G.overCd--;
+    if (G.overCd === 0) { reset(); G.state = 'TITLE'; }
+  }
+  pressed.length = 0;
+}
+
+
+// ============================================================================
+// 13. 渲染
+// ============================================================================
+var cv = document.getElementById('cv');
+var ctx = cv.getContext('2d', { alpha: false });
+ctx.imageSmoothingEnabled = false;
+
+function countAlive(pool) {
+  var n = 0;
+  for (var i = 0; i < pool.length; i++) if (pool[i].alive) n++;
+  return n;
+}
+
+// 背景：HUD 区 / 分隔线 / 战场纯色 / 左右边框（顺序同 game.h game_bg）
+function drawBg() {
+  ctx.fillStyle = COL.hud;
+  ctx.fillRect(0, 0, CONFIG.W, CONFIG.HUD_H);
+  ctx.fillStyle = COL.acc;
+  ctx.fillRect(0, CONFIG.SEP_Y, CONFIG.W, CONFIG.SEP_H);
+  ctx.fillStyle = COL.bg;
+  ctx.fillRect(0, CONFIG.HUD_H, CONFIG.W, CONFIG.H - CONFIG.HUD_H);
+  ctx.fillStyle = COL.border;
+  ctx.fillRect(0, CONFIG.HUD_H, CONFIG.BORDER, CONFIG.H - CONFIG.HUD_H);
+  ctx.fillRect(CONFIG.X_HI, CONFIG.HUD_H, CONFIG.BORDER, CONFIG.H - CONFIG.HUD_H);
+}
+
+function spr(name, x, y) {
+  ctx.drawImage(SPR[name], x, y);
+  STAT.draws++;
+}
+
+function drawKnife(k) {
+  if (!CONFIG.KN_ROTATE) { spr('knife', k.x, k.y); return; }
+  var ang = Math.atan2(k.vy, k.vx) + Math.PI / 2;
+  ctx.save();
+  ctx.translate(k.x + 4, k.y + 4);
+  ctx.rotate(ang);
+  ctx.drawImage(SPR.knife, -4, -4);
+  ctx.restore();
+  STAT.draws++;
+}
+
+function drawEnemy(e) {
+  var sz = e.size;
+  if (e.x < CONFIG.X_LO || e.x > CONFIG.X_HI - sz ||
+      e.y < CONFIG.Y_LO || e.y > CONFIG.Y_HI - sz) return;   // 屏外不画（同 game.h）
+  spr(CONFIG.ENEMY[e.kind].art, e.x, e.y);
+  if (CONFIG.SHOW_HPBAR && sz === 16) {
+    var maxhp = CONFIG.ENEMY[e.kind].hp;
+    if (e.hp < maxhp) {
+      var r = e.hp / maxhp;
+      ctx.fillStyle = '#3a0d0d';
+      ctx.fillRect(e.x, e.y - 5, sz, 2);
+      ctx.fillStyle = r > 0.5 ? COL.green : (r > 0.25 ? COL.yellow : COL.red);
+      ctx.fillRect(e.x, e.y - 5, Math.max(1, Math.round(sz * r)), 2);
+    }
+  }
+}
+
+// 世界层：顺序同 game.h game_render（宝石 -> 粒子 -> 敌人 -> 飞刀 -> 环绕球 -> 玩家）
+function drawWorld() {
+  var i, cx = G.px + 16, cy = G.py + 16;
+  STAT.draws = 0;
+
+  for (i = 0; i < GEM.length; i++) {
+    if (GEM[i].alive) spr('gem', GEM[i].x, GEM[i].y);
+  }
+  for (i = 0; i < PA.length; i++) {
+    var p = PA[i];
+    if (!p.alive) continue;
+    var sz = (p.kind & 1) ? 4 : 6;
+    ctx.fillStyle = (p.kind & 1) ? c565(0xFFE0) : c565(0xFD20);
+    ctx.fillRect(p.x, p.y, sz, sz);
+    STAT.draws++;
+  }
+  for (i = 0; i < E8.length; i++)  if (E8[i].alive)  drawEnemy(E8[i]);
+  for (i = 0; i < E16.length; i++) if (E16[i].alive) drawEnemy(E16[i]);
+  for (i = 0; i < KN.length; i++)  if (KN[i].alive)  drawKnife(KN[i]);
+  if (G.orbN > 0) {
+    for (var o = 0; o < G.orbN; o++) {
+      var ang = (G.orbAng + o * Math.floor(16 / G.orbN)) & 15;
+      var ox = clamp(cx + OCX[ang] - 4, CONFIG.X_LO, CONFIG.X_HI - 8);
+      var oy = clamp(cy + OCY[ang] - 4, CONFIG.Y_LO, CONFIG.Y_HI - 8);
+      spr('orb', ox, oy);
+    }
+  }
+  // 玩家：无敌期间半透明闪烁（固件用 HURT 素材 + alpha=128 的 BLIT）
+  if (G.state !== 'TITLE') {
+    var blink = (G.inv > 0) && (((G.tick >> 2) & 1) === 1);
+    if (blink) {
+      ctx.globalAlpha = CONFIG.HURT_ALPHA;
+      ctx.drawImage(SPR.playerHurt, G.px, G.py);
+      ctx.globalAlpha = 1;
+      STAT.draws++;
+    } else {
+      spr('player', G.px, G.py);
+    }
+  }
+}
+
+// ---------------------------------------------------------------- HUD
+var fpsShow = 60, logicFps = 60, frameMs = 0;
+
+function pad(v, w) {
+  var s = String(Math.floor(v));
+  while (s.length < w) s = '0' + s;
+  return s;
+}
+function f1(v) { return (Math.round(v * 10) / 10).toFixed(1); }
+
+function drawHud() {
+  var ne = countAlive(E8) + countAlive(E16);
+  var elem = ne + countAlive(KN) + countAlive(GEM) + countAlive(PA) + G.orbN + 1;
+  var mm = Math.floor(G.sec / 60), ss = G.sec % 60;
+
+  var l1 = 'TIME ' + pad(mm, 2) + ':' + pad(ss, 2) +
+           '  KILL ' + pad(G.kill, 4) +
+           '  LEVEL ' + pad(G.level, 2) +
+           '  HP ' + pad(G.life, 3) + '/100';
+  text(ctx, l1, 16, 8, COL.text, 2);
+
+  var l2 = 'ELEM ' + pad(elem, 4) + '  ENEMY ' + pad(ne, 3) +
+           '  HW ' + f1(fpsShow) + '  SW ' + f1(logicFps) +
+           '  FIRE ' + G.fireLv;
+  text(ctx, l2, 16, 40, COL.green, 2);
+
+  var l3 = 'ARROWS/WASD MOVE   P PAUSE   Q TITLE   AUTO-FIRE   F1 DEBUG   H HELP';
+  text(ctx, l3, 16, 72, COL.dim, 2);
+}
+
+// 右下角 FPS + 帧时间（需求 12）
+function drawFpsBox() {
+  if (!CONFIG.SHOW_FPS) return;
+  var s = 'FPS ' + f1(fpsShow) + '  DRAW ' + f1(frameMs) + 'MS';
+  var w = textW(s, 2) + 20;
+  var x = CONFIG.W - 16 - w, y = CONFIG.H - 16 - 16 - 10;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(x, y, w, 30);
+  text(ctx, s, x + 10, y + 7, COL.green, 2);
+}
+
+
+// ---------------------------------------------------------------- 覆盖层
+function panel(x, y, w, h, fill, border) {
+  ctx.fillStyle = fill;
+  ctx.fillRect(x, y, w, h);
+  if (border) {
+    ctx.fillStyle = border;
+    ctx.fillRect(x, y, w, 3);
+    ctx.fillRect(x, y + h - 3, w, 3);
+    ctx.fillRect(x, y, 3, h);
+    ctx.fillRect(x + w - 3, y, 3, h);
+  }
+}
+function textIn(ctx2, s, x, w, y, col, sc) {
+  text(ctx2, s, Math.round(x + (w - textW(s, sc)) / 2), y, col, sc);
+}
+
+function drawTitle() {
+  textC(ctx, 'GFX-1408', 300, COL.cyan, 11);
+  textC(ctx, 'SURVIVOR', 430, COL.text, 9);
+  var blink = (Math.floor(performance.now() / 550) & 1) === 0;
+  textC(ctx, 'PRESS G', 620, blink ? COL.yellow : COL.dim, 5);
+  textC(ctx, 'ARROWS / WASD TO MOVE', 780, COL.dim, 3);
+  textC(ctx, 'AUTO ATTACK -- JUST DODGE', 830, COL.dim, 3);
+  var mm = Math.floor(G.best / 60), ss = G.best % 60;
+  textC(ctx, 'BEST ' + pad(mm, 2) + ':' + pad(ss, 2), 920, COL.green, 4);
+  textC(ctx, 'H HELP   F1 DEBUG   Q TITLE', 1000, COL.dim, 2);
+  textC(ctx, 'PROTOTYPE 1920x1080  TUNE AT CONFIG IN SOURCE', 1040, c565(0x4208), 2);
+}
+
+function drawPause() {
+  panel(600, 400, 720, 320, 'rgba(8,24,12,0.93)', COL.acc);
+  textC(ctx, 'PAUSE', 440, COL.text, 10);
+  textC(ctx, 'P TO RESUME', 580, COL.dim, 3);
+  textC(ctx, 'TIME ' + pad(Math.floor(G.sec / 60), 2) + ':' + pad(G.sec % 60, 2) +
+        '   KILL ' + pad(G.kill, 4) + '   LEVEL ' + pad(G.level, 2), 640, COL.green, 3);
+}
+
+function drawOver() {
+  var mm = Math.floor(G.sec / 60), ss = G.sec % 60;
+  panel(520, 360, 880, 440, 'rgba(26,8,8,0.93)', COL.red);
+  textC(ctx, 'GAME OVER', 400, COL.red, 9);
+  textC(ctx, 'SURVIVED ' + pad(mm, 2) + ':' + pad(ss, 2), 520, COL.text, 4);
+  textC(ctx, 'KILL ' + pad(G.kill, 4) + '    LEVEL ' + pad(G.level, 2), 600, COL.green, 3);
+  var bm = Math.floor(G.best / 60), bs = G.best % 60;
+  textC(ctx, 'BEST ' + pad(bm, 2) + ':' + pad(bs, 2), 670, COL.yellow, 3);
+  var left = Math.ceil(G.overCd / 60);
+  textC(ctx, 'RETURN TITLE IN ' + left + 'S   OR PRESS G', 740, COL.dim, 2);
+}
+
+function drawUpgIcon(id, cx2, cy2) {
+  var x = cx2 - 16, y = cy2 - 16, i;
+  if (id === 0) {
+    ctx.drawImage(SPR.knife, x, y, 32, 32);
+  } else if (id === 1) {
+    ctx.drawImage(SPR.knife, x - 8, y - 8, 20, 20);
+    ctx.drawImage(SPR.knife, x + 12, y - 8, 20, 20);
+    ctx.drawImage(SPR.knife, x + 2, y + 10, 20, 20);
+  } else if (id === 2) {
+    ctx.drawImage(SPR.knife, x, y, 32, 32);
+    ctx.fillStyle = COL.yellow;
+    ctx.fillRect(x + 12, y - 6, 4, 4);
+    ctx.fillRect(x + 18, y - 2, 4, 4);
+    ctx.fillRect(x + 8, y + 2, 4, 4);
+  } else if (id === 3) {
+    ctx.drawImage(SPR.orb, x, y, 32, 32);
+  } else if (id === 4) {
+    ctx.drawImage(SPR.player, x, y);
+    ctx.fillStyle = COL.green;
+    for (i = 0; i < 3; i++) ctx.fillRect(x + 30 + i * 5, y + 12, 3, 8);
+  } else if (id === 5) {
+    ctx.fillStyle = COL.red;
+    ctx.fillRect(x + 12, y + 2, 8, 28);
+    ctx.fillRect(x + 2, y + 12, 28, 8);
+    ctx.fillStyle = c565(0xFF9A9A);
+    ctx.fillRect(x + 14, y + 4, 4, 24);
+    ctx.fillRect(x + 4, y + 14, 24, 4);
+  } else {
+    ctx.fillStyle = COL.cyan;
+    for (i = 0; i < 3; i++) {
+      ctx.fillRect(x + 4 + i * 4, y + 4 + i * 4, 26 - i * 8, 3);
+      ctx.fillRect(x + 4 + i * 4, y + 29 - i * 4, 26 - i * 8, 3);
+    }
+  }
+}
+
+function drawUpgrade() {
+  panel(480, 240, 960, 720, 'rgba(8,20,10,0.95)', COL.acc);
+  textC(ctx, 'LEVEL UP', 270, COL.yellow, 8);
+  textC(ctx, 'LEVEL ' + G.level + '   PICK ONE', 370, COL.text, 3);
+  var cw = 220, ch = 250, gap = 8, total = 4 * cw + 3 * gap;
+  var x0 = 480 + Math.floor((960 - total) / 2), y0 = 420;
+  for (var i = 0; i < 4; i++) {
+    var id = G.opt[i], sel = (i === G.optSel);
+    var x = x0 + i * (cw + gap);
+    ctx.fillStyle = sel ? '#24401f' : '#14231a';
+    ctx.fillRect(x, y0, cw, ch);
+    ctx.fillStyle = sel ? COL.yellow : COL.border;
+    ctx.fillRect(x, y0, cw, 3);
+    ctx.fillRect(x, y0 + ch - 3, cw, 3);
+    ctx.fillRect(x, y0, 3, ch);
+    ctx.fillRect(x + cw - 3, y0, 3, ch);
+    drawUpgIcon(id, x + Math.floor(cw / 2), y0 + 66);
+    textIn(ctx, UP_NAME[id], x, cw, y0 + 14, sel ? COL.yellow : COL.text, 2);
+    textIn(ctx, upgPreview(id), x, cw, y0 + 118, sel ? COL.text : COL.green, 3);
+    textIn(ctx, UP_DESC[id], x, cw, y0 + 154, COL.dim, 2);
+    textIn(ctx, 'LV ' + G.upgLv[id], x, cw, y0 + 190, COL.dim, 2);
+    if (sel) textIn(ctx, '>> SELECTED <<', x, cw, y0 + 216, COL.yellow, 2);
+  }
+  textC(ctx, 'LEFT / RIGHT  SELECT      UP / Z / SPACE  CONFIRM', 760, COL.text, 3);
+  textC(ctx, 'FIRE ' + G.knInt + 'F   KNIFE X' + G.knN + '   DMG ' + G.knDmg +
+        '   ORB ' + G.orbN + '   SPEED ' + G.pmove + '   MAG ' + G.magnet, 830, COL.green, 2);
+  textC(ctx, 'TIME IS FROZEN WHILE THE MENU IS OPEN', 890, COL.dim, 2);
+}
+
+function drawDebug() {
+  var lines = [
+    'DEBUG  TICK ' + G.tick + '  STATE ' + G.state,
+    'POOL E8 ' + countAlive(E8) + '/' + CONFIG.E8_MAX + '  E16 ' + countAlive(E16) + '/' + CONFIG.E16_MAX,
+    'POOL KN ' + countAlive(KN) + '/' + CONFIG.KN_MAX + '  GEM ' + countAlive(GEM) + '/' + CONFIG.GEM_MAX + '  PA ' + countAlive(PA) + '/' + CONFIG.PA_MAX,
+    'HITTEST KNIFE ' + STAT.knifeHitTests + '  ORB ' + STAT.orbHitTests + '  PLAYER ' + STAT.playerHitTests,
+    'DRAWS ' + STAT.draws + '  ENEMY MOVE ' + STAT.enemyMoves + '  RNG ' + (rngState >>> 0).toString(16).toUpperCase(),
+    'FIRE ' + G.knInt + 'F  KNIFE ' + G.knN + '  DMG ' + G.knDmg + '  ORB ' + G.orbN + '  SPEED ' + G.pmove,
+    'MAGNET ' + G.magnet + '  INV ' + G.inv + '  DIFF ' + G.diff + '  SPAWN ' + Math.min(CONFIG.SPAWN_MAX, CONFIG.SPAWN_BASE + G.diff) + '/' + CONFIG.SPAWN_EVERY + 'F',
+    'A VEL ' + (CONFIG.ENEMY.A.v16 + G.diff * CONFIG.ENEMY.A.vdiff) + '/16 PX/F   EXP ' + G.exp + '/' + G.expNeed,
+    'CENTER ' + (G.px + 16) + ',' + (G.py + 16) + '  KILL ' + G.kill + '  LEVEL ' + G.level
+  ];
+  panel(16, 112, 660, 18 + lines.length * 18, 'rgba(0,0,0,0.75)', COL.acc);
+  for (var i = 0; i < lines.length; i++) text(ctx, lines[i], 28, 120 + i * 18, COL.green, 2);
+}
+
+// ?sprite=1 精灵总览（核对美术/色键/尺寸；assets 队友做素材时可直接对这张图）
+function drawSpriteSheet() {
+  drawBg();
+  text(ctx, 'SPRITE SHEET  -- EMBEDDED FROM tools/assets.json (ASSETS TEAM)', 40, 118, COL.text, 3);
+  var items = [
+    ['A8_GEM', SPR.gem, 8], ['A8_KNIFE', SPR.knife, 8], ['A8_ORB', SPR.orb, 8],
+    ['A8_ENEMY_A', SPR.A, 8], ['A8_ENEMY_B', SPR.B, 8], ['A8_ENEMY_C', SPR.C, 8],
+    ['A16_ENEMY_BIG', SPR.BIG, 16], ['A16_ENEMY_ELITE', SPR.ELITE, 16],
+    ['A32_PLAYER', SPR.player, 32], ['A32_PLAYER_HURT', SPR.playerHurt, 32]
+  ];
+  var cols = 5, cw = 360, chh = 340, ox = 40, oy = 190, i;
+  for (i = 0; i < items.length; i++) {
+    var bx = ox + (i % cols) * cw, by = oy + Math.floor(i / cols) * chh;
+    var sc = Math.max(2, Math.floor(190 / items[i][2]));
+    ctx.fillStyle = '#0d130d';
+    ctx.fillRect(bx, by, cw - 40, chh - 70);
+    ctx.drawImage(items[i][1], bx + 20, by + 20, items[i][2] * sc, items[i][2] * sc);
+    text(ctx, items[i][0], bx + 20, by + 225, COL.yellow, 2);
+    text(ctx, items[i][2] + 'X' + items[i][2] + '  X' + sc + ' ZOOM', bx + 20, by + 252, COL.dim, 2);
+  }
+}
+
+function drawOverlay() {
+  if (G.state === 'TITLE') drawTitle();
+  else if (G.state === 'PAUSE') drawPause();
+  else if (G.state === 'OVER') drawOver();
+  else if (G.state === 'UPGRADE') drawUpgrade();
+  else if (G.state === 'PLAY') {
+    if (G.banner > 0) textC(ctx, G.bannerTxt, 460, COL.yellow, 4);
+    if (G.flash > 0) textC(ctx, 'LEVEL ' + G.level, 400, COL.yellow, 5);
+  }
+  if (dbgOn) drawDebug();
+}
+
+
+// ============================================================================
+// 14. AI（只用于截图快进与 ?sim 数值模拟，正常游戏不启用）
+// ============================================================================
+var AI_DIRS = [[0, -1, 1], [1, 0, 2], [0, 1, 4], [-1, 0, 8],
+               [1, -1, 3], [-1, -1, 9], [1, 1, 6], [-1, 1, 12], [0, 0, 0]];
+
+function aiThink() {
+  var cx = G.px + 16, cy = G.py + 16, sp = G.pmove * 7;
+  var bestScore = -1e9, bestDir = 0, d;
+  for (d = 0; d < AI_DIRS.length; d++) {
+    var nx = cx + AI_DIRS[d][0] * sp;
+    var ny = cy + AI_DIRS[d][1] * sp;
+    var score = 0, i, e, dx, dy, dd, nearest = 1e18, gbest = 1e18;
+    if (nx < CONFIG.X_LO + 60 || nx > CONFIG.X_HI - 60) score -= 130;
+    if (ny < CONFIG.Y_LO + 60 || ny > CONFIG.Y_HI - 60) score -= 130;
+    // 别把 AI 逼进角里：轻微拉回场地中心（真人也不会一直贴边）
+    score -= (Math.abs(nx - CONFIG.W / 2) +
+              Math.abs(ny - (CONFIG.Y_LO + CONFIG.Y_HI) / 2)) * 0.09;
+    for (i = 0; i < E8.length; i++) {
+      e = E8[i]; if (!e.alive) continue;
+      dx = e.x + 4 - nx; dy = e.y + 4 - ny; dd = dx * dx + dy * dy;
+      if (dd < nearest) nearest = dd;
+    }
+    for (i = 0; i < E16.length; i++) {
+      e = E16[i]; if (!e.alive) continue;
+      dx = e.x + 8 - nx; dy = e.y + 8 - ny; dd = dx * dx + dy * dy;
+      if (dd < nearest) nearest = dd;
+    }
+    score += Math.min(Math.sqrt(nearest), 140) * 2.2;
+    for (i = 0; i < GEM.length; i++) {
+      var g = GEM[i]; if (!g.alive) continue;
+      dx = g.x + 4 - nx; dy = g.y + 4 - ny; dd = dx * dx + dy * dy;
+      if (dd < gbest) gbest = dd;
+    }
+    if (gbest < 1e17) score -= Math.min(Math.sqrt(gbest), 320) * 0.35;
+    score += rnd(100) / 100 * 4;
+    if (score > bestScore) { bestScore = score; bestDir = AI_DIRS[d][2]; }
+  }
+  return bestDir;
+}
+
+function aiPick() {
+  var pref = (G.life < 45) ? [5, 1, 0, 3, 2, 4, 6] : [1, 0, 3, 2, 4, 6, 5];
+  for (var p = 0; p < pref.length; p++) {
+    for (var i = 0; i < 4; i++) {
+      if (G.opt[i] === pref[p]) {
+        G.optSel = i; applyUpgrade(G.opt[i]);
+        G.state = 'PLAY'; G.inv = 30;
+        return;
+      }
+    }
+  }
+  applyUpgrade(G.opt[0]); G.state = 'PLAY'; G.inv = 30;
+}
+
+// 用 AI 快进 frames 帧（截图 / 调试用）
+function fastForward(frames) {
+  aiDirOverride = 0;
+  for (var i = 0; i < frames; i++) {
+    if (G.state === 'PLAY') { aiDirOverride = aiThink(); step(); }
+    else if (G.state === 'UPGRADE') aiPick();
+    else if (G.state === 'OVER') break;
+    else break;
+  }
+  aiDirOverride = -1;
+  pressed.length = 0;
+}
+
+// ============================================================================
+// 15. 数值平衡模拟（?sim=N&trials=K，无渲染，结果打到页面上）
+// ============================================================================
+var NL = String.fromCharCode(10);
+
+function runSim(steps, trials) {
+  var out = [];
+  out.push('=== GFX-1408 SURVIVOR prototype balance sim ===');
+  out.push('steps/trial=' + steps + '  trials=' + trials + '  speed=8px/f  knife=3dmg/18f');
+  var deadN = 0, deadSum = 0, t;
+  for (t = 0; t < trials; t++) {
+    CONFIG.SEED = (0x5EED1234 + t * 7919) >>> 0;
+    reset(); G.state = 'PLAY'; G.inv = 30;
+    aiDirOverride = 0;
+    var maxE = 0, sumE = 0, nE = 0, frames = 0, i;
+    var sumDist = 0, nDist = 0, near300 = 0, nNear = 0, maxGem = 0, sumGem = 0;
+    for (i = 0; i < steps; i++) {
+      if (G.state === 'PLAY') { aiDirOverride = aiThink(); step(); }
+      else if (G.state === 'UPGRADE') aiPick();
+      else break;
+      var ne = countAlive(E8) + countAlive(E16);
+      if (ne > maxE) maxE = ne;
+      sumE += ne; nE++; frames++;
+      // 敌人到玩家的距离分布：验证"海量敌人"是否真的压到玩家身边
+      if ((i & 7) === 0 && ne > 0) {
+        var pcx = G.px + 16, pcy = G.py + 16, j, ee, ddx2, ddy2, dd2, dc, within = 0;
+        for (j = 0; j < E8.length; j++) {
+          ee = E8[j]; if (!ee.alive) continue;
+          ddx2 = ee.x + 4 - pcx; ddy2 = ee.y + 4 - pcy; dc = Math.sqrt(ddx2 * ddx2 + ddy2 * ddy2);
+          sumDist += dc; nDist++;
+          if (dc < 300) within++;
+        }
+        for (j = 0; j < E16.length; j++) {
+          ee = E16[j]; if (!ee.alive) continue;
+          ddx2 = ee.x + 8 - pcx; ddy2 = ee.y + 8 - pcy; dc = Math.sqrt(ddx2 * ddx2 + ddy2 * ddy2);
+          sumDist += dc; nDist++;
+          if (dc < 300) within++;
+        }
+        near300 += within; nNear += ne;
+      }
+      var ng = countAlive(GEM);
+      if (ng > maxGem) maxGem = ng;
+      sumGem += ng;
+    }
+    aiDirOverride = -1;
+    out.push('TRIAL ' + t + ' seed=' + CONFIG.SEED + '  state=' + G.state +
+             '  survived=' + G.sec + 's  kills=' + G.kill + '  level=' + G.level +
+             '  maxEnemy=' + maxE + '  avgEnemy=' + (nE ? Math.round(sumE / nE) : 0) +
+             '  maxGem=' + maxGem);
+    out.push('   swarm: avgDist=' + (nDist ? Math.round(sumDist / nDist) : 0) + 'px' +
+             '  pctEnemyWithin300=' + (nNear ? Math.round(100 * near300 / nNear) : 0) + '%' +
+             '  avgGem=' + (nE ? Math.round(sumGem / nE) : 0) +
+             '  build: fire=' + G.knInt + 'f/x' + G.knN +
+             '  dmg=' + G.knDmg + '  orb=' + G.orbN + '  spd=' + G.pmove + '  mag=' + G.magnet +
+             '  upg=' + G.upgLv.join('/'));
+    if (G.state === 'OVER') { deadN++; deadSum += G.sec; }
+  }
+  out.push('--- died ' + deadN + '/' + trials +
+           '   avg death ' + (deadN ? (deadSum / deadN).toFixed(1) : 'n/a') + 's');
+  var txt = out.join(NL);
+  var el = document.getElementById('simout');
+  el.style.display = 'block';
+  el.textContent = txt;
+  document.title = 'SIM ' + out[out.length - 1];
+  drawBg();
+  ctx.fillStyle = 'rgba(0,0,0,0.86)';
+  ctx.fillRect(30, 130, 1520, 40 + out.length * 22);
+  for (var k = 0; k < out.length; k++) {
+    text(ctx, out[k].slice(0, 118), 50, 150 + k * 22, COL.green, 2);
+  }
+}
+
+// ?bench=N  同步跑 N 帧 step+render，量 JS/Canvas 提交成本（不发截图，只报数字）
+// 满池压力：把每个池都塞满（敌人无敌），量最坏情况下的绘制提交成本
+function fillStress() {
+  var i, e;
+  for (i = 0; i < E8.length; i++) {
+    e = E8[i];
+    e.alive = 1; e.kind = (i % 3 === 0) ? 'A' : ((i % 3 === 1) ? 'B' : 'C');
+    e.size = 8; e.hp = 9999; e.v16 = 16; e.t = 0; e.accx = 0; e.accy = 0;
+    e.x = CONFIG.X_LO + rnd(CONFIG.X_HI - CONFIG.X_LO - 8);
+    e.y = CONFIG.Y_LO + rnd(CONFIG.Y_HI - CONFIG.Y_LO - 8);
+  }
+  for (i = 0; i < E16.length; i++) {
+    e = E16[i];
+    e.alive = 1; e.kind = (i & 1) ? 'BIG' : 'ELITE';
+    e.size = 16; e.hp = 9999; e.v16 = 11; e.t = 0;
+    e.x = CONFIG.X_LO + rnd(CONFIG.X_HI - CONFIG.X_LO - 16);
+    e.y = CONFIG.Y_LO + rnd(CONFIG.Y_HI - CONFIG.Y_LO - 16);
+  }
+  for (i = 0; i < GEM.length; i++) {
+    e = GEM[i]; e.alive = 1;
+    e.x = CONFIG.X_LO + rnd(CONFIG.X_HI - CONFIG.X_LO - 8);
+    e.y = CONFIG.Y_LO + rnd(CONFIG.Y_HI - CONFIG.Y_LO - 8);
+  }
+  for (i = 0; i < PA.length; i++) {
+    e = PA[i]; e.alive = 1; e.kind = i & 1; e.t = 999;
+    e.x = CONFIG.X_LO + rnd(CONFIG.X_HI - CONFIG.X_LO - 8);
+    e.y = CONFIG.Y_LO + rnd(CONFIG.Y_HI - CONFIG.Y_LO - 8);
+  }
+  for (i = 0; i < KN.length; i++) {
+    e = KN[i]; e.alive = 1; e.vx = 26; e.vy = 0;
+    e.x = CONFIG.X_LO + rnd(CONFIG.X_HI - CONFIG.X_LO - 8);
+    e.y = CONFIG.Y_LO + rnd(CONFIG.Y_HI - CONFIG.Y_LO - 8);
+  }
+  G.orbN = CONFIG.ORB_MAX;
+}
+
+function runBench(n, stress) {
+  reset(); G.state = 'PLAY'; G.inv = 30;
+  if (stress) fillStress();
+  aiDirOverride = 0;
+  var t0 = performance.now(), i, peak = 0;
+  for (i = 0; i < n; i++) {
+    G.inv = 999; G.life = 100;          // 压力模式不让玩家死，保持满池
+    if (G.state === 'PLAY') { aiDirOverride = aiThink(); step(); }
+    else if (G.state === 'UPGRADE') aiPick();
+    else if (G.state === 'OVER') { reset(); G.state = 'PLAY'; G.inv = 30; if (stress) fillStress(); }
+    if (stress && (i % 30) === 0) fillStress();
+    render();
+    var ne = countAlive(E8) + countAlive(E16);
+    if (ne > peak) peak = ne;
+  }
+  aiDirOverride = -1;
+  var ms = (performance.now() - t0) / n;
+  var out = [];
+  out.push('BENCH ' + n + ' frames  avg ' + ms.toFixed(2) + ' ms/frame  (step + canvas2d 提交)');
+  out.push('=> 16.67ms 预算余量 ' + (16.67 / ms).toFixed(1) + 'x   峰值同屏敌人 ' + peak);
+  out.push('当前 draws ' + STAT.draws + '  E8 ' + countAlive(E8) + '  E16 ' + countAlive(E16) +
+           '  GEM ' + countAlive(GEM) + '  PA ' + countAlive(PA) + '  KN ' + countAlive(KN));
+  var txt = out.join(NL);
+  var el = document.getElementById('simout');
+  el.style.display = 'block';
+  el.textContent = txt;
+  document.title = 'BENCH ' + ms.toFixed(2) + 'ms';
+  drawBg();
+  ctx.fillStyle = 'rgba(0,0,0,0.86)';
+  ctx.fillRect(30, 130, 1520, 40 + out.length * 24);
+  for (var k = 0; k < out.length; k++) text(ctx, out[k], 50, 150 + k * 24, COL.green, 2);
+}
+
+
+// ============================================================================
+// 16. 输入 / 缩放 / 帮助面板 / 主循环 / 启动
+// ============================================================================
+var helpEl = null;
+var timeScale = 1;
+var staticShot = false, shotDone = false;
+
+function buildHelp() {
+  helpEl = document.createElement('div');
+  helpEl.style.cssText =
+    'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);' +
+    'width:980px;max-width:93%;max-height:90%;overflow:auto;display:none;z-index:10;' +
+    'background:rgba(6,18,10,0.97);border:3px solid #5aeb5a;color:#cfe8cf;' +
+    'font:13px/1.7 Consolas,Menlo,monospace;padding:18px 24px;border-radius:4px;';
+  var L = [];
+  L.push('<b style="color:#ffe066;font-size:16px">GFX-1408 SURVIVOR · 浏览器可玩原型</b>' +
+         '<span style="float:right;color:#7f9f7f">H 关闭</span>');
+  L.push('');
+  L.push('<b style="color:#8fe3ff">怎么玩</b>');
+  L.push('  G / Enter 开始     方向键 或 WASD 移动（8 方向，对角 3/4）    自动攻击：飞刀自动打最近敌人');
+  L.push('  P 暂停/继续    Q 回标题    R 重开    , / . 时间 0.5x / 2x    F1 调试面板    H 本帮助');
+  L.push('  升级时：← → 选择，↑ / W / Z / 空格 确认；升级期间游戏时间冻结');
+  L.push('');
+  L.push('<b style="color:#8fe3ff">怎么调参（改完保存 + 刷新即可）</b>');
+  L.push('  用任意文本编辑器打开本文件，最上面的 <b>CONFIG</b> 对象就是全部数值：');
+  L.push('  P_SPEED=8 玩家速度 / KN_INT=18 飞刀间隔 / KN_DMG=3 飞刀伤害 / KN_MAX=80 飞刀上限');
+  L.push('  ORB_R=44 ORB_DMG=6 / SPAWN_EVERY=20 每批帧数 / SPAWN_BASE=3 批量 / E8_MAX=480 E16_MAX=24 池');
+  L.push('  MAGNET=70 磁吸半径 / EXP_BASE=5 EXP_LV=4 升级阈值 5+4*level / ELITE_FIRST=45 ELITE_EVERY=45 精英');
+  L.push('  ENEMY.A/B/C/BIG/ELITE 里改 hp / v16(1/16 像素每帧) / vdiff(每级难度加速) / dmg');
+  L.push('  颜色：C_BG=0x0861 战场 / C_HUD=0x10A2 HUD / C_ACC=0x5AEB 分隔线 / C_BORDER=0x18E3 边框');
+  L.push('  想切回固件的&#39;对角不动&#39;行为：把 moveEnemy 里的对角分支改成 step 整像素即可（见注释）');
+  L.push('');
+  L.push('<b style="color:#8fe3ff">URL 参数（截图 / 复现）</b>');
+  L.push('  ?auto=title|play|upgrade|pause|over   &amp;ff=秒（AI 快进）  &amp;static=1（只画一帧）  &amp;seed=数字');
+  L.push('  ?sim=5400&amp;trials=5  无渲染跑 AI 生存模拟，把生存时间/击杀/等级/同屏敌人数打到页面上');
+  L.push('');
+  L.push('<b style="color:#8fe3ff">与固件的关系</b>');
+  L.push('  布局 / 颜色 / 状态机 / 池上限 / HUD 文案 / 刷怪 ramp / 升级步长 都照 work/gfx_demo/src/game.h；');
+  L.push('  精灵图直接内联 tools/assets.json（assets 队友最终素材），画出来就是固件要显示的那份；');
+  L.push('  ?sprite=1 可看精灵总览表，核对色键/尺寸/调色板。');
+  L.push('  已知有意偏差：① 敌人对角速度按设计意图修好（固件 (sx*step)&gt;&gt;4 在 step&lt;=1 时恒为 0）；');
+  L.push('  ② 敌人从屏外走进来（固件生成后立刻 clamp 进场）；③ 飞刀默认 2 个子步命中检测（固件 1 步会穿怪）；');
+  L.push('  ④ 飞刀可旋转（固件无旋转指令）；⑤ 环绕球也能打 16x16（固件只判 8x8 池）。');
+  L.push('  这些都能在 CONFIG 里一键关掉，对照见文件头注释。');
+  helpEl.innerHTML = L.join('<br>');
+  document.body.appendChild(helpEl);
+}
+
+function toggleHelp() {
+  helpOn = !helpOn;
+  if (helpEl) helpEl.style.display = helpOn ? 'block' : 'none';
+}
+
+function fit() {
+  var vw = window.innerWidth, vh = window.innerHeight;
+  var s = Math.min(vw / CONFIG.W, vh / CONFIG.H);
+  cv.style.width = Math.floor(CONFIG.W * s) + 'px';
+  cv.style.height = Math.floor(CONFIG.H * s) + 'px';
+}
+
+var BLOCK = { Space: 1, ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1,
+              Enter: 1, NumpadEnter: 1, F1: 1 };
+
+window.addEventListener('keydown', function (ev) {
+  var c = ev.code;
+  if (c === 'F1') { dbgOn = !dbgOn; ev.preventDefault(); return; }
+  if (c === 'KeyH') { toggleHelp(); ev.preventDefault(); return; }
+  if (c === 'KeyR') { reset(); G.state = 'PLAY'; G.inv = 30; ev.preventDefault(); return; }
+  if (c === 'Comma') { timeScale = 0.5; return; }
+  if (c === 'Period') { timeScale = 2; return; }
+  if (c === 'Digit0' || c === 'Backquote') { timeScale = 1; return; }
+  if (!ev.repeat) pressed.push(c);
+  keys[c] = true;
+  if (BLOCK[c]) ev.preventDefault();
+});
+window.addEventListener('keyup', function (ev) { delete keys[ev.code]; });
+window.addEventListener('blur', function () { keys = {}; });
+window.addEventListener('resize', fit);
+
+function render() {
+  drawBg();
+  drawWorld();
+  drawHud();
+  drawFpsBox();
+  drawOverlay();
+}
+
+var FIXED = 1000 / 60;
+var acc = 0, lastT = 0, framesCnt = 0, fpsT = 0, logicCnt = 0, logicT = 0;
+
+function loop(now) {
+  if (staticShot && shotDone) return;
+  requestAnimationFrame(loop);
+  if (lastT === 0) { lastT = now; fpsT = now; logicT = now; return; }
+  var dt = now - lastT;
+  lastT = now;
+  if (dt > 250) dt = 250;
+  acc += dt * timeScale;
+  var steps = 0;
+  while (acc >= FIXED && steps < 8) { step(); acc -= FIXED; steps++; logicCnt++; }
+  if (acc > FIXED * 8) acc = 0;
+  var t0 = performance.now();
+  render();
+  frameMs = frameMs * 0.9 + (performance.now() - t0) * 0.1;
+  framesCnt++;
+  if (now - fpsT >= 300) {
+    fpsShow = framesCnt * 1000 / (now - fpsT);
+    framesCnt = 0; fpsT = now;
+  }
+  if (now - logicT >= 300) {
+    logicFps = logicCnt * 1000 / (now - logicT);
+    logicCnt = 0; logicT = now;
+  }
+}
+
+function parseQ() {
+  var out = {}, s = window.location.search || '';
+  if (s.length > 1) s = s.slice(1);
+  var parts = s.split('&');
+  for (var i = 0; i < parts.length; i++) {
+    if (!parts[i]) continue;
+    var kv = parts[i].split('=');
+    out[kv[0]] = (kv.length > 1) ? kv[1] : '1';
+  }
+  return out;
+}
+
+function boot() {
+  initPools();
+  buildSprites();
+  loadBest();
+  buildHelp();
+  fit();
+  var q = parseQ();
+  if (q.seed) CONFIG.SEED = (parseInt(q.seed, 10) | 0) >>> 0;
+  reset();
+  G.state = 'TITLE';
+
+  if (q.dbg) dbgOn = true;
+  if (q.help) toggleHelp();
+
+  if (q.sim) {
+    runSim(parseInt(q.sim, 10) || 3600, parseInt(q.trials, 10) || 1);
+    return;
+  }
+  if (q.sprite) {
+    drawSpriteSheet();
+    staticShot = true; shotDone = true;
+    return;
+  }
+  if (q.bench) {
+    runBench(parseInt(q.bench, 10) || 300, !!q.stress);
+    return;
+  }
+
+  var ff = (parseInt(q.ff, 10) || 0) * 60;
+  var auto = q.auto || '';
+  if (auto === 'title') {
+    reset(); G.state = 'TITLE';
+  } else if (auto || ff > 0) {
+    reset(); G.state = 'PLAY'; G.inv = 30;
+    if (ff > 0) fastForward(ff);
+    if (auto === 'upgrade') {
+      if (G.state !== 'UPGRADE') { G.level++; G.exp = 0; openUpgrade(); }
+    } else if (auto === 'pause') {
+      G.state = 'PAUSE';
+    } else if (auto === 'over') {
+      if (G.state !== 'OVER') { G.state = 'OVER'; G.overCd = CONFIG.OVER_FRAMES; }
+    }
+    if (q.stress) fillStress();   // &stress=1 直接把所有池塞满，看最坏画面
+  }
+  pressed.length = 0;
+
+  if (q.static) {
+    staticShot = true;
+    render();
+    shotDone = true;
+    return;
+  }
+  requestAnimationFrame(loop);
+}
+
+boot();
+
+</script>
+</body>
+</html>
+

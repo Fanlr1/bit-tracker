@@ -1,0 +1,913 @@
+{
+  "generated_at": "2026-10-16 00:44:16",
+  "root": "C:\\Users\\25437\\Desktop\\竞赛\\嵌入式设计竞赛FPGA设计项目\\2D图形加速引擎\\docs",
+  "schema": [
+    "path",
+    "title",
+    "kind",
+    "status",
+    "tags",
+    "summary",
+    "chars",
+    "mtime"
+  ],
+  "authority": {
+    "current_state": "..\\新会话交接-20261015.md",
+    "current_state_note": "The handover note is the authoritative current state. docs\\README.md is NOT: its state section is a snapshot.",
+    "stale": [
+      "README.md"
+    ],
+    "stale_note": "README.md says (2026-10-07) regression 21 tests / LUT 14725; the tree is at 25 tests / LUT 30520 as of 2026-10-15. Read it for structure, not numbers.",
+    "newest_findings": [
+      "82-tile化帧缓冲方案与风险.md",
+      "81-行合并可行性判别.md",
+      "80-往返分解与各方向收益上限.md",
+      "79-方向A同步FIFO实施.md",
+      "78-通往2048的优化方向调研.md",
+      "77-扩表2048的真相-元凶是综合选项.md",
+      "75-性能退化的真相-扫描输出开关.md",
+      "76-扩表到2048.md",
+      "73-方案A目标读跨行流水.md",
+      "74-方案B写侧不等B响应-实测与回退.md",
+      "72-每精灵成本分解-按行往返主导.md"
+    ]
+  },
+  "counts": {
+    "total": 80,
+    "by_status": {
+      "historical": 45,
+      "current": 32,
+      "superseded": 2,
+      "stale-index": 1
+    }
+  },
+  "docs": [
+    {
+      "path": "00-赛题要求.md",
+      "title": "赛题要求（2026 嵌赛 FPGA 赛道 · 易灵思）",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "早期 2D 游戏机与现代嵌入式 GUI 中，完全依靠 CPU 死循环逐像素搬运渲染，**极大占用 CPU 资源、帧率骤降**。核心趋势是「**异构计算与软硬件协同设计（HW/SW Co-design）**」。",
+      "chars": 11627,
+      "mtime": "2026-10-07 18:28"
+    },
+    {
+      "path": "01-SoC底座摸排.md",
+      "title": "Ti60F225 SoC 底座摸排报告（RISC-V + FPGA 异构）",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**只有 2 个子目录**（确认事实，`Get-ChildItem S08` 实测）：",
+      "chars": 36641,
+      "mtime": "2026-10-07 02:11"
+    },
+    {
+      "path": "02-板卡资源与demo清单.md",
+      "title": "Ti60F225 板卡与资料摸排报告",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**空缺编号** 06/14/15/16 在资料包中**不存在**（顶层目录已确认，非解压遗漏）。",
+      "chars": 26755,
+      "mtime": "2026-10-08 01:23"
+    },
+    {
+      "path": "03-视频通路摸排.md",
+      "title": "Ti60F225 视频通路摸排报告（显示输出 + 摄像头输入）",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "```",
+      "chars": 41375,
+      "mtime": "2026-10-07 02:11"
+    },
+    {
+      "path": "04-硬件权威事实.md",
+      "title": "硬件权威事实（从原理图与官方设计说明核实）",
+      "kind": "reference",
+      "status": "current",
+      "tags": [
+        "硬件",
+        "权威"
+      ],
+      "summary": "DDR3/HDMI/引脚等硬件事实，冲突时以此为准",
+      "chars": 4775,
+      "mtime": "2026-10-05 23:17"
+    },
+    {
+      "path": "05-官方设计说明精读.md",
+      "title": "05-官方设计说明精读",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**Panel（屏）**（L604–L626）",
+      "chars": 48920,
+      "mtime": "2026-10-07 02:11"
+    },
+    {
+      "path": "07-接口约定.md",
+      "title": "接口约定（核对官方模块后固化）",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**文件**：`...\\10_Ti60f225_sc431hai2hdmi_demo\\Ti60f225_sc431hai2hdmi_v1\\rtl\\frame_buffer\\frame_buffer.v`（350 行）",
+      "chars": 8678,
+      "mtime": "2026-10-06 00:04"
+    },
+    {
+      "path": "08-M4综合验证.md",
+      "title": "M4 综合验证结果",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "```",
+      "chars": 4281,
+      "mtime": "2026-10-07 02:10"
+    },
+    {
+      "path": "09-M1验证.md",
+      "title": "M1 验证记录（`bitblt_axi_slave`）",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**AXI4 从设备 + 寄存器组**，挂在 Sapphire SoC 的 **`0xE1000000`** 窗口（16 MB / 32-bit / 支持突发）。",
+      "chars": 4526,
+      "mtime": "2026-10-07 02:10"
+    },
+    {
+      "path": "10-实现计划.md",
+      "title": "10 · 实现计划（已合并）",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "",
+      "chars": 1131,
+      "mtime": "2026-10-07 03:02"
+    },
+    {
+      "path": "11-AXI互联方案对比.md",
+      "title": "AXI 互联方案对比与选型",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "`ddr3_top` **只有 1 个 AXI4 Slave 口**，已被 SoC 的 `io_ddrA`（128 bit）独占。",
+      "chars": 8741,
+      "mtime": "2026-10-06 00:00"
+    },
+    {
+      "path": "12-顶层集成设计.md",
+      "title": "12 · 顶层集成设计（已合并）",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "",
+      "chars": 855,
+      "mtime": "2026-10-07 03:02"
+    },
+    {
+      "path": "13-顶层集成验证.md",
+      "title": "顶层集成验证记录（M2）",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "```",
+      "chars": 6747,
+      "mtime": "2026-10-07 02:11"
+    },
+    {
+      "path": "14-整机集成与假PASS教训.md",
+      "title": "整机集成与「假 PASS」教训",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "```",
+      "chars": 6338,
+      "mtime": "2026-10-06 01:06"
+    },
+    {
+      "path": "16-视频扫描输出与软件驱动.md",
+      "title": "视频扫描输出与软件驱动",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "这两次都**没有报错**，是核对资源数字才发现的。",
+      "chars": 11862,
+      "mtime": "2026-10-06 01:54"
+    },
+    {
+      "path": "18-全链路重审计.md",
+      "title": "全链路重审计报告",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "前面几轮的验证（单元测试、端到端仿真、整机综合）**各自只看自己那一层**。",
+      "chars": 9532,
+      "mtime": "2026-10-07 02:11"
+    },
+    {
+      "path": "19-重审计与自动化检查.md",
+      "title": "全链路重审计（含自动化脚本）",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "本项目已出现 **两次「假 PASS」**（逻辑被静默删除、工具仍报成功）。",
+      "chars": 9808,
+      "mtime": "2026-10-07 02:11"
+    },
+    {
+      "path": "20-代码审计报告.md",
+      "title": "代码审计报告（代码写法维度）",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "18/19 号做的是**跨层一致性**审计（值对上没有、位宽匹配没有），覆盖了地址、像素格式、AXI ID、中断链路、内存布局。",
+      "chars": 25061,
+      "mtime": "2026-10-06 03:45"
+    },
+    {
+      "path": "21-板上待验清单.md",
+      "title": "板上待验清单（4KB 跨界 · AXI 仲裁 · HSIO 速率 · TMDS 信号完整性 · 消隐期使能）",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "AXI4 规定**一个 burst 不得跨越 4 KB 边界**，这是 Master 的责任。我们有两处违反：",
+      "chars": 30420,
+      "mtime": "2026-10-08 01:23"
+    },
+    {
+      "path": "22-审计问题修复记录.md",
+      "title": "审计问题修复记录",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "本项目的两次「假 PASS」已经说明：**回归通过只证明「没改坏」，不证明「改对了」。**",
+      "chars": 7329,
+      "mtime": "2026-10-06 11:03"
+    },
+    {
+      "path": "24-静态性能建模.md",
+      "title": "静态性能建模",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "```",
+      "chars": 7957,
+      "mtime": "2026-10-06 20:58"
+    },
+    {
+      "path": "26-创新点与优化方向.md",
+      "title": "26 · 创新点与优化方向（已合并）",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "",
+      "chars": 686,
+      "mtime": "2026-10-07 03:01"
+    },
+    {
+      "path": "27-创新点评估.md",
+      "title": "27 · 创新点评估 —— 用赛题立意做尺子",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**赛题立意（原文）**：",
+      "chars": 10507,
+      "mtime": "2026-10-07 03:01"
+    },
+    {
+      "path": "28-待办优先级.md",
+      "title": "28 · 待办优先级",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**⇒ 工具已就绪：`board-check.ps1` 会逐条判读 `[TEST:*]` 并保存日志；它明确声明**看不见显示器**，颜色/撕裂/行正确性仍需人眼。**",
+      "chars": 8739,
+      "mtime": "2026-10-08 12:11"
+    },
+    {
+      "path": "29-P1混合模式完成记录.md",
+      "title": "P1 完成记录：三种额外混合模式",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "在原有 4 种操作之外，新增 3 种混合模式：",
+      "chars": 5484,
+      "mtime": "2026-10-06 12:19"
+    },
+    {
+      "path": "30-端到端混合值追查记录.md",
+      "title": "端到端混合值追查记录",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "端到端 TB 加了「MUL 混合」用例后：",
+      "chars": 5775,
+      "mtime": "2026-10-06 12:26"
+    },
+    {
+      "path": "31-P2越界保护完成记录.md",
+      "title": "P2 完成记录：越界保护 + 一次文件截断事故",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**原计划写的是「硬件裁剪」**，但动手前发现那个设计有个前提问题：",
+      "chars": 8085,
+      "mtime": "2026-10-06 12:39"
+    },
+    {
+      "path": "32-P2收尾与P3推迟.md",
+      "title": "P2 收尾记录：驱动侧裁剪 + 一次计划调整",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**`28-待办优先级.md` 里把 P3（突发合并）标为「风险中」**，但动手前重新看了一遍数据流：",
+      "chars": 6542,
+      "mtime": "2026-10-07 02:10"
+    },
+    {
+      "path": "33-当前可选工作清单.md",
+      "title": "33 · 当前可选工作清单（已合并）",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "",
+      "chars": 989,
+      "mtime": "2026-10-07 03:03"
+    },
+    {
+      "path": "34-架构总览.md",
+      "title": "架构总览",
+      "kind": "reference",
+      "status": "current",
+      "tags": [
+        "架构"
+      ],
+      "summary": "模块划分与数据通路总览",
+      "chars": 18326,
+      "mtime": "2026-10-07 16:02"
+    },
+    {
+      "path": "36-tb_mux_video调查结论.md",
+      "title": "tb_mux_video 调查：从组合环路到换 FIFO",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**`dual_clock_fifo.v`（厂商代码）的【每一个】状态输出都组合依赖于 handshake 输入**：",
+      "chars": 9951,
+      "mtime": "2026-10-06 17:36"
+    },
+    {
+      "path": "37-队列数组越界根因.md",
+      "title": "tb_mux_video 根因：队列数组越界",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**⇒ 一个 4 vs 8 的数组大小错，串起了 `tb_mux_video` 的全部症状。**",
+      "chars": 4955,
+      "mtime": "2026-10-06 17:35"
+    },
+    {
+      "path": "38-组合读数组无法映射块RAM.md",
+      "title": "组合读数组无法映射到块 RAM",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**⇒ 我在自写 FIFO 里用了一个【组合读】的寄存器数组当存储，仿真全过，综合把器件撑爆了。**",
+      "chars": 8965,
+      "mtime": "2026-10-06 18:10"
+    },
+    {
+      "path": "39-全链路验证与重复检测.md",
+      "title": "全链路验证脚本与重复测试台检测",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**⇒ 回归和综合原本是【分开跑的】，所以存在一个真实缺口：改动可以【通过全部 16 个测试台，却在综合时炸掉】。**",
+      "chars": 7408,
+      "mtime": "2026-10-07 02:10"
+    },
+    {
+      "path": "40-仲裁与HSIO与4KB查证.md",
+      "title": "三点查证结论：仲裁 · HSIO · 4KB 跨界",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**`rtl/system_top.v` 第 975 行：**",
+      "chars": 15267,
+      "mtime": "2026-10-06 21:06"
+    },
+    {
+      "path": "41-1080p60全链路达成与PLL方案.md",
+      "title": "41 · 1080p60 全链路达成与 PLL 方案",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**⇒ 关键突破点有两个，都不在 RTL 里**：**① 用板上一直闲置的 27 MHz 晶振；② 把 PLL 的反馈输出与显示输出解耦。**",
+      "chars": 10791,
+      "mtime": "2026-10-06 22:37"
+    },
+    {
+      "path": "42-P3突发合并实现记录.md",
+      "title": "42 · P3 突发合并实现记录",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**⇒ 改动只涉及 `bitblt_addr_gen.v` 与 `bitblt_top.v`，`bitblt_dma_rd` 内部一行未动** —— 它本来就是线性读引擎，「每行一次突发」是调用侧造成的。",
+      "chars": 7425,
+      "mtime": "2026-10-06 23:57"
+    },
+    {
+      "path": "43-P4实现记录.md",
+      "title": "43 · P4 Sprite 状态硬件维护实现记录",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**⇒ P4 的核心语义**已成立：「CPU 一次下发 sprite 表，硬件自己遍历、**更新状态**、渲染」。**",
+      "chars": 7428,
+      "mtime": "2026-10-07 00:35"
+    },
+    {
+      "path": "44-P4弹幕能力记录.md",
+      "title": "44 · P4 弹幕能力记录（槽位扩容 · 退休 · 回收）",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**⇒ 核心数字：32 个 8×2 精灵一帧 **2624 拍**，合 **82 拍/精灵**；外推 256 个 16×16 约 **0.95 ms**，占 16.7 ms 帧预算的 **5.7%（上界）**。**",
+      "chars": 11323,
+      "mtime": "2026-10-07 16:31"
+    },
+    {
+      "path": "45-验证方法论与审计总览.md",
+      "title": "45 · 验证方法论与审计总览",
+      "kind": "reference",
+      "status": "current",
+      "tags": [
+        "方法"
+      ],
+      "summary": "验证方法与审计口径",
+      "chars": 19113,
+      "mtime": "2026-10-08 13:03"
+    },
+    {
+      "path": "46-候选优化方向评估.md",
+      "title": "46 · 候选优化方向评估（含否决理由）",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**⇒ 建议原文**：「按 128-bit 并发写 ⇒ 对 DDR3 就是频繁的随机小写 ⇒ 效率 40%」。",
+      "chars": 7865,
+      "mtime": "2026-10-07 03:07"
+    },
+    {
+      "path": "47-游戏Demo实现与验证记录.md",
+      "title": "47 · 游戏 Demo 实现与验证记录",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**⇒ 四个源文件在**两处副本**（工作区与构建目录）**，MD5 全部一致** —— 那个分叉曾经导致过一次调试白费。**",
+      "chars": 20116,
+      "mtime": "2026-10-07 10:56"
+    },
+    {
+      "path": "48-片上断言监控.md",
+      "title": "48 · 片上断言监控（`bitblt_monitor`）",
+      "kind": "reference",
+      "status": "current",
+      "tags": [
+        "监控"
+      ],
+      "summary": "11 项片上监控条件与寄存器语义",
+      "chars": 21324,
+      "mtime": "2026-10-07 23:51"
+    },
+    {
+      "path": "49-风险登记册.md",
+      "title": "49 · 风险登记册",
+      "kind": "record",
+      "status": "current",
+      "tags": [
+        "风险"
+      ],
+      "summary": "风险清单",
+      "chars": 9856,
+      "mtime": "2026-10-07 16:33"
+    },
+    {
+      "path": "50-提交材料清单与要求.md",
+      "title": "50 · 提交材料清单与要求",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**⇒ 演示视频与技术文档**都必须【不含【学校名、指导老师名** ✓",
+      "chars": 25766,
+      "mtime": "2026-10-09 19:20"
+    },
+    {
+      "path": "51-技术文档草稿.md",
+      "title": "技术文档草稿 —— 按模板逐节",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "（**800 字内**）",
+      "chars": 36621,
+      "mtime": "2026-10-10 15:31"
+    },
+    {
+      "path": "52-带宽与显示稳定性待决.md",
+      "title": "52 · 带宽与显示稳定性 —— 待决问题",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**⇒ 指向**部分刷新 / 帧缓冲压缩**这一类**省带宽**的技术（[docs/50](50-提交材料清单与要求.md) 里曾列为候选 ③）。**",
+      "chars": 6182,
+      "mtime": "2026-10-08 01:54"
+    },
+    {
+      "path": "53-同类工作调研与定位.md",
+      "title": "53 · 同类工作调研与定位",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**⇒ 解读：它测量了「绘制模式 → DDR bank 切换延迟 → 性能波动」，把「提高硬件绘制速度」列为自己**未完成的未来工作**。**",
+      "chars": 18949,
+      "mtime": "2026-10-09 19:12"
+    },
+    {
+      "path": "54-演示视频脚本.md",
+      "title": "54 · 演示视频脚本（限 3 分钟）",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**⇒ 作品简介（**报名时已提交、不可更改**）里写了：**",
+      "chars": 7785,
+      "mtime": "2026-10-10 15:27"
+    },
+    {
+      "path": "55-全面审查报告.md",
+      "title": "55 · 全面审查报告",
+      "kind": "record",
+      "status": "historical",
+      "tags": [],
+      "summary": "**⇒ **⇒ 判定：**两者都对，且在这个设计里**无害**** —— 理由是：**",
+      "chars": 26849,
+      "mtime": "2026-10-10 16:04"
+    },
+    {
+      "path": "56-引擎AXI写通道根因.md",
+      "title": "56 - 引擎 AXI 写通道不可用 —— 板上根因（2026-10-12 夜）",
+      "kind": "record",
+      "status": "current",
+      "tags": [],
+      "summary": "复位后**不做任何写**，直接读引擎寄存器：",
+      "chars": 16030,
+      "mtime": "2026-10-13 00:10"
+    },
+    {
+      "path": "57-LogicAnalyzer调试记录.md",
+      "title": "57 - Efinity Logic Analyzer 调试记录（2026-10-13 凌晨）",
+      "kind": "record",
+      "status": "current",
+      "tags": [],
+      "summary": "**⇒ 净成果**：把 Logic Analyzer 从\"完全打不通\"推进到\"调试核已进比特流，只差 Debugger 侧最后一环\"。",
+      "chars": 8367,
+      "mtime": "2026-10-13 01:46"
+    },
+    {
+      "path": "58-写后读死锁根因与修复.md",
+      "title": "58 - 引擎「写后读永久失效」根因与修复（2026-10-13）",
+      "kind": "record",
+      "status": "current",
+      "tags": [],
+      "summary": "**⇒ 两处缺一不可。**",
+      "chars": 7780,
+      "mtime": "2026-10-13 13:13"
+    },
+    {
+      "path": "59-板上写引擎崩溃排查.md",
+      "title": "59 - 板上「写引擎寄存器崩溃」排查（2026-10-13 全天）",
+      "kind": "record",
+      "status": "current",
+      "tags": [],
+      "summary": "**BRAM 镜像的 5 处副本**（只改一处无效，这是今天踩的大坑）：",
+      "chars": 6988,
+      "mtime": "2026-10-13 22:21"
+    },
+    {
+      "path": "60-引擎永不完成排查.md",
+      "title": "60 - 板上调试续：从「第二行 printf 就死」到「引擎永不完成」（2026-10-13 下半场）",
+      "kind": "record",
+      "status": "current",
+      "tags": [],
+      "summary": "**教训 A**：bsp_printf（print.h）只支持 c/s/d/X/x；**不认识的格式符会让内层 while 继续扫描**，",
+      "chars": 5372,
+      "mtime": "2026-10-13 23:24"
+    },
+    {
+      "path": "61-读通道死锁与硬件填充跑通.md",
+      "title": "60 - 板上调试：从「第二行 printf 就死」到「硬件填充跑通」（2026-10-13/14）",
+      "kind": "record",
+      "status": "current",
+      "tags": [],
+      "summary": "**根因 4 的完整链条（每环都有板上实测）**：",
+      "chars": 6659,
+      "mtime": "2026-10-14 00:37"
+    },
+    {
+      "path": "62-仿真暴露RTL编译错误.md",
+      "title": "62 - 仿真从未覆盖当前 RTL：一个前向引用错误（2026-10-14 凌晨）",
+      "kind": "record",
+      "status": "current",
+      "tags": [],
+      "summary": "**修复**：三个声明上移到 L276 附近（`awreadyReg/arreadyReg` 之后、任何使用之前），逻辑一字未改。",
+      "chars": 4946,
+      "mtime": "2026-10-14 01:01"
+    },
+    {
+      "path": "63-读通道死锁根因与修复.md",
+      "title": "63 - 读通道死锁的根因与修复：突发准入控制（2026-10-14 上午）",
+      "kind": "finding",
+      "status": "current",
+      "tags": [
+        "死锁",
+        "AXI"
+      ],
+      "summary": "读通道死锁根因（burst 中途撤 rready）与突发准入修复",
+      "chars": 7484,
+      "mtime": "2026-10-14 13:30"
+    },
+    {
+      "path": "64-精灵密度扫描与STATUS位修复.md",
+      "title": "64 - 精灵密度扫描，以及一个被注释掩盖的 STATUS 位（2026-10-14 下午）",
+      "kind": "record",
+      "status": "current",
+      "tags": [],
+      "summary": "**可调密度扫描已实现并上板（10/10 通过）**；过程中发现 **STATUS bit 0 用的是 `addr_busy`（不含 walker）**，",
+      "chars": 4578,
+      "mtime": "2026-10-14 13:57"
+    },
+    {
+      "path": "65-四项收尾.md",
+      "title": "65 - 四项收尾：burst 优化 · 帧时间诚实化 · starvation 计数器 · 回归（2026-10-14 晚）",
+      "kind": "record",
+      "status": "current",
+      "tags": [],
+      "summary": "四项全部处理完毕：**性能 +3.8%** · **游戏帧时间由虚报 0.46 ms 改为真实 23.7 ms** ·",
+      "chars": 8296,
+      "mtime": "2026-10-14 19:27"
+    },
+    {
+      "path": "66-外部优化建议评估清单.md",
+      "title": "66 - 外部优化建议评估清单（9 项 + 3 刀）",
+      "kind": "record",
+      "status": "current",
+      "tags": [],
+      "summary": "**这是本清单最该记住的一层**：同一批建议里，有的在解\"现在\"，有的在解\"迟早\"。",
+      "chars": 9031,
+      "mtime": "2026-10-14 19:20"
+    },
+    {
+      "path": "67-潜伏的307Hz：显示bug与性能bug.md",
+      "title": "67 - 一个潜伏的 307 Hz：既是显示 bug，也是性能 bug（2026-10-14 夜）",
+      "kind": "finding",
+      "status": "current",
+      "tags": [
+        "显示"
+      ],
+      "summary": "扫描输出实际跑 640x480@307Hz；修后真 1080p60 且引擎快 24%",
+      "chars": 3766,
+      "mtime": "2026-10-14 19:40"
+    },
+    {
+      "path": "68-1080p扫描输出诊断进展.md",
+      "title": "68 - 1080p 扫描输出问题：诊断与复现进展（进行中 · goal 第 1 轮）",
+      "kind": "finding",
+      "status": "current",
+      "tags": [
+        "显示",
+        "AXI"
+      ],
+      "summary": "扫描输出分段读缺陷的复现与 A/B 对照",
+      "chars": 6303,
+      "mtime": "2026-10-14 20:05"
+    },
+    {
+      "path": "69-回归清零与三个问题.md",
+      "title": "69 - 回归清零 + 三个问题的答案（2026-10-14 深夜）",
+      "kind": "record",
+      "status": "current",
+      "tags": [],
+      "summary": "**SKIP 机制的设计理由**（与脚本原有注释同源）：一个\"因为已知原因长期红着\"的套件**没人会读**，真正的编译失败就会藏在里面。所以跳过必须**显式、带原因、且不影响退出码**。",
+      "chars": 3978,
+      "mtime": "2026-10-14 20:35"
+    },
+    {
+      "path": "70-精灵表扩到1024槽.md",
+      "title": "70 - 精灵表扩到 1024 槽（2026-10-14 深夜）",
+      "kind": "finding",
+      "status": "superseded",
+      "tags": [
+        "精灵表"
+      ],
+      "summary": "256->1024 槽与对照实验；其\"1.87x 运行间波动\"的解释已被 docs/75 修正",
+      "chars": 6991,
+      "mtime": "2026-10-14 21:40"
+    },
+    {
+      "path": "71-屏上实时读数与1024进60fps.md",
+      "title": "71 - 屏上实时读数（OSD）+ 1024 精灵进 60 fps（2026-10-14 深夜）",
+      "kind": "finding",
+      "status": "current",
+      "tags": [
+        "OSD",
+        "性能"
+      ],
+      "summary": "屏上 OSD + 1024 精灵进 60fps；其\"快/慢随机\"的说法已被 docs/75 修正",
+      "chars": 4865,
+      "mtime": "2026-10-14 22:25"
+    },
+    {
+      "path": "72-每精灵成本分解-按行往返主导.md",
+      "title": "72 - 每精灵成本分解：按行往返主导（2026-10-14 深夜）",
+      "kind": "finding",
+      "status": "current",
+      "tags": [
+        "性能",
+        "测量"
+      ],
+      "summary": "形状实验：86% 成本是每行一次 DDR 往返，不是带宽",
+      "chars": 5321,
+      "mtime": "2026-10-14 22:45"
+    },
+    {
+      "path": "73-方案A目标读跨行流水.md",
+      "title": "73 - 方案 A：目标读跨行流水（2026-10-14 深夜）",
+      "kind": "finding",
+      "status": "current",
+      "tags": [
+        "性能",
+        "RTL"
+      ],
+      "summary": "方案 A：目标读整矩形一次启动，净收益 1.20x",
+      "chars": 12675,
+      "mtime": "2026-10-14 23:34"
+    },
+    {
+      "path": "74-方案B写侧不等B响应-实测与回退.md",
+      "title": "74 - 方案 B（写侧不等 B 响应）：实现、实测与回退（2026-10-14 深夜）",
+      "kind": "finding",
+      "status": "current",
+      "tags": [
+        "性能",
+        "RTL"
+      ],
+      "summary": "方案 B 负收益已回退；附超 DDR 时钟此路不通（PLL 到顶）",
+      "chars": 7144,
+      "mtime": "2026-10-14 23:47"
+    },
+    {
+      "path": "75-性能退化的真相-扫描输出开关.md",
+      "title": "75 - \"性能退化\"的真相：扫描输出的开关（2026-10-15 凌晨，结论已修正）",
+      "kind": "finding",
+      "status": "current",
+      "tags": [
+        "性能",
+        "重要"
+      ],
+      "summary": "重要纠正：\"性能退化\"不存在，那是扫描输出的开关；真实基线 1,230 而非 763",
+      "chars": 5117,
+      "mtime": "2026-10-15 00:23"
+    },
+    {
+      "path": "76-扩表到2048.md",
+      "title": "76 - 扩表到 2048：先试便宜的杠杆（2026-10-15 凌晨）",
+      "kind": "finding",
+      "status": "superseded",
+      "tags": [
+        "精灵表",
+        "结论已被77推翻"
+      ],
+      "summary": "扩表 2048 的七次尝试记录。★ §8 的\"占用率90%判据\"已被 docs/77 推翻，读 §8 前先读 77",
+      "chars": 14352,
+      "mtime": "2026-10-15 08:34"
+    },
+    {
+      "path": "77-扩表2048的真相-元凶是综合选项.md",
+      "title": "77 - 扩表 2048：上线成功，以及七次失败的真实原因",
+      "kind": "finding",
+      "status": "current",
+      "tags": [
+        "精灵表",
+        "性能",
+        "重要",
+        "已达成"
+      ],
+      "summary": "★ 2048 扩表上线 + 算力上限实测 1,376 精灵（999.2‰ 预算，边际 1,196 拍/精灵，r2=0.999986）；真凶是 use-logic-for-small-mem=0（把 DDR 小 FIFO 改成 RAM10），不是 N、不是占用率",
+      "chars": 10969,
+      "mtime": "2026-10-15 08:48"
+    },
+    {
+      "path": "78-通往2048的优化方向调研.md",
+      "title": "78 - 调研：跑 2048 精灵（以及更高）的优化方向",
+      "kind": "finding",
+      "status": "current",
+      "tags": [
+        "调研",
+        "优化方向",
+        "性能"
+      ],
+      "summary": "通往 2048 精灵的优化方向调研：需 1.49x；A-F 组合约 1.97k，G(行合并)可达 2-3x 但有条件；2048 后带宽成硬墙",
+      "chars": 13301,
+      "mtime": "2026-10-15 12:47"
+    },
+    {
+      "path": "79-方向A同步FIFO实施.md",
+      "title": "79 - 方向 A 实施：输出 FIFO 改同步读（FWFT）",
+      "kind": "finding",
+      "status": "current",
+      "tags": [
+        "性能",
+        "RTL",
+        "方向A"
+      ],
+      "summary": "方向 A 第一步：输出 FIFO 换成 FWFT 同步读（可落 BRAM），吞吐仍 1 拍/字，回归 26/0；深度刻意留 32，分两步走",
+      "chars": 14477,
+      "mtime": "2026-10-15 20:08"
+    },
+    {
+      "path": "80-往返分解与各方向收益上限.md",
+      "title": "80 - 往返分解：各优化方向的收益上限（2026-10-15 13:40）",
+      "kind": "finding",
+      "status": "current",
+      "tags": [
+        "性能",
+        "测量",
+        "收益上限"
+      ],
+      "summary": "往返分解：目标读+写占 83.6%（每行一次，结构性）；描述符批量上限仅 2.2%、纹理缓存 11.7% —— 2,048 只能靠行合并",
+      "chars": 4931,
+      "mtime": "2026-10-15 13:42"
+    },
+    {
+      "path": "81-行合并可行性判别.md",
+      "title": "81 - 行合并可行性判别：收益完全取决于布点密度（2026-10-15 13:50）",
+      "kind": "finding",
+      "status": "current",
+      "tags": [
+        "性能",
+        "判别",
+        "行合并"
+      ],
+      "summary": "行合并判别：密排布点 3.45x、随机弹幕 0.92x（反而更慢）—— 收益由横向覆盖率决定，是【针对测量场景】的优化而非通用加速",
+      "chars": 4472,
+      "mtime": "2026-10-15 13:45"
+    },
+    {
+      "path": "82-tile化帧缓冲方案与风险.md",
+      "title": "82 - tile 化帧缓冲：12.46× 的实测证据、完整方案与风险",
+      "kind": "finding",
+      "status": "current",
+      "tags": [
+        "性能",
+        "方案",
+        "tile"
+      ],
+      "summary": "tile 化帧缓冲：实测连续目标比 strided 快 12.46×（89 vs 1109 拍）；难点全在扫描输出需 96 个 RAM10 的行带缓冲；含四阶段实施计划",
+      "chars": 6703,
+      "mtime": "2026-10-15 20:26"
+    },
+    {
+      "path": "83-RGB565改造评估.md",
+      "title": "83 - RGB565 帧缓冲改造评估（2026-10-15 晚）",
+      "kind": "record",
+      "status": "current",
+      "tags": [],
+      "summary": "**已落地**：",
+      "chars": 9536,
+      "mtime": "2026-10-15 22:46"
+    },
+    {
+      "path": "84-阶段2扫描输出565失败记录.md",
+      "title": "84 - 阶段2（扫描输出 565）失败记录与重做路径",
+      "kind": "record",
+      "status": "current",
+      "tags": [],
+      "summary": "**扫描输出从 4×24 位改成 8×16 位，全部改完、能编译、行数/AR/契约全对，但像素全错**",
+      "chars": 21033,
+      "mtime": "2026-10-15 23:47"
+    },
+    {
+      "path": "README.md",
+      "title": "索引与当前状态",
+      "kind": "index",
+      "status": "stale-index",
+      "tags": [
+        "索引",
+        "数字已过时"
+      ],
+      "summary": "人读的结构索引。其中\"当前状态\"一节停在 2026-10-07（回归 21 项 / LUT 14725），数字一律勿信；权威状态看交接文档",
+      "chars": 20331,
+      "mtime": "2026-10-14 22:25"
+    }
+  ]
+}
